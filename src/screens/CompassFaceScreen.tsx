@@ -59,10 +59,7 @@ export function CompassFaceScreen() {
   const dense = model.tracked.length >= DENSE_THRESHOLD;
   const ringSize = Math.min(width - DIAL_MARGIN * 2, height * 0.46);
 
-  const headerRight =
-    dense || own.altitude === null
-      ? `${model.tracked.length} tracked`
-      : `Alt ${Math.round(own.altitude)} m`;
+  const headerRight = own.altitude === null ? `${model.tracked.length} tracked` : `Alt ${Math.round(own.altitude)} m`;
 
   const [footerLeft, footerRight] = dense
     ? [summarise(model.nearest, 'Nearest'), summarise(model.farthest, 'Farthest')]
@@ -71,7 +68,7 @@ export function CompassFaceScreen() {
   return (
     <View style={[styles.screen, { paddingTop: insets.top + 20 }]}>
       <View style={styles.header}>
-        <Text style={[styles.caps, styles.capsInk]}>Compass</Text>
+        <Text style={[styles.caps, styles.capsInk]}>Orbit</Text>
         <Text style={[styles.caps, styles.capsMuted]}>{headerRight}</Text>
       </View>
 
