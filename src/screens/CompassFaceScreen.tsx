@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -10,7 +10,7 @@ import { useHeading } from '../hooks/useHeading';
 import { useOwnLocation } from '../hooks/useOwnLocation';
 import { buildCompassModel, type FriendReading } from '../lib/compassModel';
 import { formatDistance } from '../lib/geo';
-import { friendLocationSource } from '../services/activeSource';
+import { createFriendLocationSource } from '../services/activeSource';
 import { DEFAULT_TRACKED_IDS } from '../services/mockSource';
 import { color, font } from '../theme/tokens';
 
@@ -31,9 +31,15 @@ export function CompassFaceScreen() {
 
   const [trackedIds, setTrackedIds] = useState<string[]>(DEFAULT_TRACKED_IDS);
 
-  const friends = useFriendLocations(friendLocationSource);
   const own = useOwnLocation();
   const { heading } = useHeading();
+
+  // Read through a ref so the source is built once but always sees the latest fix.
+  const originRef = useRef(own.coords);
+  originRef.current = own.coords;
+  const source = useMemo(() => createFriendLocationSource(() => originRef.current), []);
+
+  const friends = useFriendLocations(source);
 
   const model = useMemo(
     () => buildCompassModel({ friends, origin: own.coords, heading, trackedIds }),

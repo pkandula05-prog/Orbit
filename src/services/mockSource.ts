@@ -18,7 +18,11 @@ const SEED = [
 export const DEFAULT_TRACKED_IDS = ['ana', 'miles'];
 
 type MockSourceOptions = {
-  origin?: Coords;
+  /**
+   * Read at each tick rather than captured once, so the demo roster re-anchors around the
+   * device as soon as a real fix arrives — otherwise every friend sits in San Francisco.
+   */
+  getOrigin?: () => Coords;
   /** Set to 0 to freeze positions, which is what the screenshot tests want. */
   updateMs?: number;
 };
@@ -28,7 +32,7 @@ type MockSourceOptions = {
  * bearings and distances behave like a live feed.
  */
 export function createMockSource({
-  origin = DEMO_ORIGIN,
+  getOrigin = () => DEMO_ORIGIN,
   updateMs = 4000,
 }: MockSourceOptions = {}): FriendLocationSource {
   const snapshot = (elapsedMs: number): FriendLocation[] =>
@@ -36,7 +40,7 @@ export function createMockSource({
       const seconds = elapsedMs / 1000;
       const wander = Math.sin(seconds / 30 + index) * friend.driftMps * 40;
       const point = destinationPoint(
-        origin,
+        getOrigin(),
         friend.bearing + Math.sin(seconds / 45 + index) * 3,
         Math.max(60, friend.metres + wander),
       );

@@ -44,8 +44,9 @@ Two implementations ship with the app:
 
 - **`createMockSource()`** (`src/services/mockSource.ts`) — the roster from the artboards
   (Ana, Miles, Jae, Priya + four more) at the bearings and distances the design was drawn
-  with, drifting slowly so the dial behaves like a live feed. This is the default, so the app
-  runs with no backend.
+  with, drifting slowly so the dial behaves like a live feed. It scatters that roster around
+  *your* position once a real fix arrives, so the dial is useful wherever you run it. This is
+  the default, so the app runs with no backend.
 - **`createRestSource()`** (`src/services/friendLocations.ts`) — polls a JSON endpoint:
 
   ```json
