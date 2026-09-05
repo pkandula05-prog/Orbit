@@ -6,37 +6,46 @@ import { color, font } from '../theme/tokens';
 type TrackingRowProps = {
   friends: FriendReading[];
   onToggle: (id: string) => void;
+  /** Untracked tiles dim and stop responding once this many are already tracked. */
+  maxTracked: number;
 };
 
-export function TrackingRow({ friends, onToggle }: TrackingRowProps) {
+export function TrackingRow({ friends, onToggle, maxTracked }: TrackingRowProps) {
+  const trackedCount = friends.filter((friend) => friend.tracked).length;
+
   return (
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={styles.row}
     >
-      {friends.map((friend) => (
-        <Pressable
-          key={friend.id}
-          onPress={() => onToggle(friend.id)}
-          accessibilityRole="switch"
-          accessibilityState={{ checked: friend.tracked }}
-          accessibilityLabel={`Track ${friend.name}`}
-          style={styles.tile}
-        >
-          <View style={[styles.badge, friend.tracked ? styles.badgeOn : styles.badgeOff]}>
-            <Text style={[styles.initial, friend.tracked ? styles.initialOn : styles.initialOff]}>
-              {friend.initial}
-            </Text>
-          </View>
-          <Text
-            style={[styles.name, friend.tracked ? styles.nameOn : styles.nameOff]}
-            numberOfLines={1}
+      {friends.map((friend) => {
+        const atCap = !friend.tracked && trackedCount >= maxTracked;
+
+        return (
+          <Pressable
+            key={friend.id}
+            onPress={() => onToggle(friend.id)}
+            disabled={atCap}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: friend.tracked, disabled: atCap }}
+            accessibilityLabel={`Track ${friend.name}`}
+            style={[styles.tile, atCap && styles.tileDisabled]}
           >
-            {friend.name}
-          </Text>
-        </Pressable>
-      ))}
+            <View style={[styles.badge, friend.tracked ? styles.badgeOn : styles.badgeOff]}>
+              <Text style={[styles.initial, friend.tracked ? styles.initialOn : styles.initialOff]}>
+                {friend.initial}
+              </Text>
+            </View>
+            <Text
+              style={[styles.name, friend.tracked ? styles.nameOn : styles.nameOff]}
+              numberOfLines={1}
+            >
+              {friend.name}
+            </Text>
+          </Pressable>
+        );
+      })}
     </ScrollView>
   );
 }
@@ -50,6 +59,9 @@ const styles = StyleSheet.create({
     width: 54,
     alignItems: 'center',
     rowGap: 6,
+  },
+  tileDisabled: {
+    opacity: 0.35,
   },
   badge: {
     width: 54,

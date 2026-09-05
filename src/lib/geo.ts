@@ -77,9 +77,8 @@ export function cardinalName(heading: number): string {
   return CARDINALS[Math.round(normalizeDegrees(heading) / 45) % 8];
 }
 
-/** The artboards quantise every numeral to 2°, which also stops the readout flickering. */
 export function quantizeDegrees(deg: number): number {
-  return (Math.round(deg / 2) * 2) % 360;
+  return Math.round(deg) % 360;
 }
 
 export function formatHeading(heading: number): string {
@@ -88,7 +87,7 @@ export function formatHeading(heading: number): string {
 
 export function formatDelta(delta: number): string {
   const sign = delta >= 0 ? '+' : '−';
-  const magnitude = Math.abs(Math.round(delta / 2) * 2);
+  const magnitude = Math.abs(Math.round(delta));
   return `${sign}${String(magnitude).padStart(3, '0')}°`;
 }
 

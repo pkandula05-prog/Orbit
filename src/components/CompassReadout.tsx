@@ -28,7 +28,13 @@ export function CompassReadout({ ringSize, heading, tracked, dense }: CompassRea
         style={{
           fontFamily: font.heading,
           fontSize: headingSize,
-          lineHeight: headingSize * 0.84,
+          // A line box tighter than the font's own metrics (the artboards' CSS line-height:
+          // .84) clips the glyph tops on native Text, even though it renders fine on web —
+          // react-native-web maps this to a CSS line-height, which browsers never clip.
+          // Keep the box safely tall, and pull the tight stacking back in with negative margin.
+          lineHeight: headingSize,
+          marginTop: -headingSize * 0.08,
+          marginBottom: -headingSize * 0.08,
           letterSpacing: headingSize * -0.04,
           color: color.ink,
         }}

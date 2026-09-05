@@ -16,6 +16,8 @@ import { color, font } from '../theme/tokens';
 
 /** Three or more tracked friends switches the readout to the 5b grid layout. */
 const DENSE_THRESHOLD = 3;
+/** 5b's own readout only has room for a 2x2 grid — four is the most the dial can show clearly. */
+const MAX_TRACKED = 4;
 const SIDE_PADDING = 32;
 const DIAL_MARGIN = 10;
 
@@ -47,9 +49,11 @@ export function CompassFaceScreen() {
   );
 
   const toggle = useCallback((id: string) => {
-    setTrackedIds((current) =>
-      current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
-    );
+    setTrackedIds((current) => {
+      if (current.includes(id)) return current.filter((entry) => entry !== id);
+      if (current.length >= MAX_TRACKED) return current;
+      return [...current, id];
+    });
   }, []);
 
   const dense = model.tracked.length >= DENSE_THRESHOLD;
@@ -88,7 +92,7 @@ export function CompassFaceScreen() {
           {model.readings.length > 0 ? 'Tracking · tap to toggle' : 'Waiting for friend feed'}
         </Text>
 
-        <TrackingRow friends={model.readings} onToggle={toggle} />
+        <TrackingRow friends={model.readings} onToggle={toggle} maxTracked={MAX_TRACKED} />
 
         <View style={styles.summary}>
           <Text style={[styles.caps, styles.capsInk, styles.summaryItem]} numberOfLines={1}>
