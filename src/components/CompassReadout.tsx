@@ -1,4 +1,5 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef } from 'react';
+import { Animated, StyleSheet, Text, View } from 'react-native';
 
 import { cardinalName, formatDelta, formatHeading } from '../lib/geo';
 import type { FriendReading } from '../lib/compassModel';
@@ -17,14 +18,24 @@ type CompassReadoutProps = {
 
 export function CompassReadout({ ringSize, heading, tracked, dense }: CompassReadoutProps) {
   const u = (value: number) => (value / DIAL_UNITS) * ringSize;
-  const headingSize = u(dense ? 56 : 66);
+
+  // Adding a 3rd+ tracked friend shrinks and raises the numeral (5b's layout) — animate that
+  // shift instead of snapping.
+  const denseAnim = useRef(new Animated.Value(dense ? 1 : 0)).current;
+  useEffect(() => {
+    Animated.timing(denseAnim, { toValue: dense ? 1 : 0, duration: 260, useNativeDriver: false }).start();
+  }, [dense, denseAnim]);
+
+  const top = denseAnim.interpolate({ inputRange: [0, 1], outputRange: [u(118), u(106)] });
+  const headingSize = denseAnim.interpolate({ inputRange: [0, 1], outputRange: [u(66), u(56)] });
+  const headingMargin = Animated.multiply(headingSize, -0.08);
 
   return (
-    <View
+    <Animated.View
       pointerEvents="none"
-      style={[styles.block, { left: u(84), top: u(dense ? 106 : 118), width: u(200) }]}
+      style={[styles.block, { left: u(84), top, width: u(200) }]}
     >
-      <Text
+      <Animated.Text
         style={{
           fontFamily: font.heading,
           fontSize: headingSize,
@@ -33,14 +44,14 @@ export function CompassReadout({ ringSize, heading, tracked, dense }: CompassRea
           // react-native-web maps this to a CSS line-height, which browsers never clip.
           // Keep the box safely tall, and pull the tight stacking back in with negative margin.
           lineHeight: headingSize,
-          marginTop: -headingSize * 0.08,
-          marginBottom: -headingSize * 0.08,
-          letterSpacing: headingSize * -0.04,
+          marginTop: headingMargin,
+          marginBottom: headingMargin,
+          letterSpacing: Animated.multiply(headingSize, -0.04),
           color: color.ink,
         }}
       >
         {formatHeading(heading)}
-      </Text>
+      </Animated.Text>
 
       <Text style={[styles.caps, { fontSize: u(11), letterSpacing: u(11) * 0.18, marginTop: u(8) }]}>
         {cardinalName(heading)}
@@ -91,7 +102,7 @@ export function CompassReadout({ ringSize, heading, tracked, dense }: CompassRea
           ))}
         </View>
       )}
-    </View>
+    </Animated.View>
   );
 }
 
