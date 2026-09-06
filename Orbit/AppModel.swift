@@ -11,7 +11,7 @@ enum Phase: Equatable {
     case permissions // 05
     case invite      // 06
     case inviteSent  // 07
-    case compass     // 09 / 5a / 5b
+    case orbit       // 09 / 5a / 5b
 }
 
 /// 5b's readout only has room for a 2×2 grid — four is the most the dial can show clearly.
@@ -22,18 +22,29 @@ let denseThreshold = 3
 @MainActor
 @Observable
 final class AppModel {
-    var phase: Phase = .launch
-    /// The sharing request (08) arrives over whatever is on screen.
-    var incomingRequest: Contact?
+    enum UsernameState: Equatable {
+        case empty, invalid, checking, available, taken
+    }
 
-    var phone = "+1 415 555 0134"
+    var phase: Phase = .launch
+
+    var profile = Profile(phone: "+1 415 555 0134")
     var agreedToTerms = true
+    var usernameState: UsernameState = .empty
     var code = ""
+    var signInError: String?
+    var isWorking = false
+
     var contacts: [Contact] = []
     var selectedInvites: Set<String> = []
     var trackedIDs: [String] = []
-    var signInError: String?
-    var isWorking = false
+    /// Whether the address book has been matched — the friends page asks, nothing else does.
+    var hasMatchedContacts = false
+    var contactsDenied = false
+
+    /// Sheets over the dial: the invite inbox and the friends page.
+    var showingInvites = false
+    var showingFriends = false
 
     let compass = DeviceCompass()
     private(set) var friends: [FriendLocation] = []
@@ -41,13 +52,18 @@ final class AppModel {
     private let backend: AccountBackend
     private var sentCode = ""
     private var feedTask: Task<Void, Never>?
-    private var acceptTask: Task<Void, Never>?
+    private var eventTask: Task<Void, Never>?
+    private var usernameTask: Task<Void, Never>?
+    /// Previous fix per friend, so their course and speed can be handed to the widgets.
+    private var previousFixes: [String: FriendLocation] = [:]
+    private var motion: [String: (course: Double, speed: Double)] = [:]
+    private var lastSnapshot: OrbitSnapshot?
     private var lastSnapshotWrite = Date.distantPast
 
     private let defaults = OrbitShared.defaults ?? .standard
     private enum Key {
         static let onboarded = "orbit.onboarded"
-        static let phone = "orbit.phone"
+        static let profile = "orbit.profile"
         static let tracked = "orbit.tracked"
         static let contacts = "orbit.contacts"
     }
@@ -76,15 +92,54 @@ final class AppModel {
         return "Alt \(Int(altitude.rounded())) m"
     }
 
+    /// People who asked to share with you and are still waiting on an answer. Nothing of yours
+    /// is shared with them until you accept.
+    var incomingInvites: [Contact] { contacts.filter { $0.relation == .invitedMe } }
+
+    /// Only people you and they have both agreed to share with are on the dial.
+    private var sharingIDs: [String] { contacts.filter { $0.relation == .sharing }.map(\.id) }
+
     // MARK: - Lifecycle
 
     func start() {
         compass.start()
-        if contacts.isEmpty {
-            Task { contacts = await backend.contacts() }
-        }
+        if contacts.isEmpty { loadDirectory() }
         startFeed()
-        listenForAcceptances()
+        listenForEvents()
+    }
+
+    /// Without contacts access there is still the invite inbox and search, so the page is never
+    /// empty and the permission stays optional.
+    private func loadDirectory() {
+        Task {
+            let invites = (try? await backend.invites()) ?? []
+            merge(invites)
+        }
+    }
+
+    func matchContacts() {
+        Task {
+            guard let phones = await ContactsAccess.requestAndFetch() else {
+                contactsDenied = true
+                return
+            }
+            hasMatchedContacts = true
+            contactsDenied = false
+            merge((try? await backend.match(phones: phones)) ?? [])
+        }
+    }
+
+    /// Adds people we did not already know about, and never downgrades a relation we hold.
+    private func merge(_ incoming: [Contact]) {
+        for contact in incoming {
+            if let index = contacts.firstIndex(where: { $0.id == contact.id }) {
+                if contacts[index].relation == .none { contacts[index].relation = contact.relation }
+                contacts[index].isOnOrbit = contact.isOnOrbit
+            } else {
+                contacts.append(contact)
+            }
+        }
+        persist()
     }
 
     private func startFeed() {
@@ -96,8 +151,7 @@ final class AppModel {
         feedTask = Task { [weak self] in
             for await batch in source.stream() {
                 guard let self, !Task.isCancelled else { return }
-                self.friends = batch
-                self.publishSnapshot()
+                self.ingest(batch)
             }
         }
     }
@@ -113,35 +167,82 @@ final class AppModel {
         return MockFriendSource(origin: origin, visible: visible)
     }
 
-    private var sharingIDs: [String] {
-        let sharing = contacts.filter { $0.status == .sharing }.map(\.id)
-        return sharing.isEmpty ? MockFriendSource.seeds.map(\.id) : sharing
+    /// Each batch is also two fixes for the same person, which is where their course and speed
+    /// come from — the widgets need to show which way someone is moving, not just where.
+    private func ingest(_ batch: [FriendLocation]) {
+        for friend in batch {
+            if let previous = previousFixes[friend.id] {
+                let seconds = friend.updatedAt.timeIntervalSince(previous.updatedAt)
+                let metres = Geo.distance(from: previous.coordinate, to: friend.coordinate)
+                if seconds > 0.5, metres > 1 {
+                    motion[friend.id] = (Geo.bearing(from: previous.coordinate, to: friend.coordinate),
+                                         metres / seconds)
+                }
+            }
+            previousFixes[friend.id] = friend
+        }
+        friends = batch
+        publishSnapshot()
     }
 
-    private func listenForAcceptances() {
-        acceptTask?.cancel()
-        acceptTask = Task { [weak self, backend] in
-            for await accepted in backend.acceptances() {
+    private func listenForEvents() {
+        eventTask?.cancel()
+        eventTask = Task { [weak self, backend] in
+            for await event in backend.events() {
                 guard let self, !Task.isCancelled else { return }
-                self.mark(accepted.id, as: .sharing)
-                // A friend accepting is the moment they can appear, so surface it.
-                self.incomingRequest = accepted
+                switch event {
+                case .invited(let contact): self.merge([contact])
+                case .accepted(let contact):
+                    self.set(contact.id, to: .sharing)
+                    self.startFeed()
+                }
             }
         }
     }
 
-    // MARK: - Onboarding
+    // MARK: - Sign in
+
+    /// Debounced so a check goes out per pause in typing, not per keystroke.
+    func usernameChanged() {
+        usernameTask?.cancel()
+        let username = profile.username.lowercased()
+        profile.username = username
+
+        guard !username.isEmpty else { usernameState = .empty; return }
+        guard Profile.isValidUsername(username) else { usernameState = .invalid; return }
+
+        usernameState = .checking
+        usernameTask = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            let available = (try? await backend.isUsernameAvailable(username)) ?? false
+            guard !Task.isCancelled, profile.username.lowercased() == username else { return }
+            usernameState = available ? .available : .taken
+        }
+    }
+
+    var canSendCode: Bool {
+        profile.isComplete && agreedToTerms && usernameState == .available
+    }
 
     func sendCode() {
         guard agreedToTerms else {
-            signInError = "Agree to the terms to continue."
+            signInError = "Agree to the terms and privacy notice to continue."
+            return
+        }
+        guard usernameState != .taken else {
+            signInError = AccountError.usernameTaken.errorDescription
+            return
+        }
+        guard profile.isComplete else {
+            signInError = AccountError.incompleteProfile.errorDescription
             return
         }
         signInError = nil
         isWorking = true
         Task {
             do {
-                sentCode = try await backend.sendCode(to: phone)
+                sentCode = try await backend.sendCode(to: profile.phone)
                 code = ""
                 phase = .verify
             } catch {
@@ -156,8 +257,8 @@ final class AppModel {
         isWorking = true
         Task {
             do {
-                try await backend.verify(code: code, sentCode: sentCode)
-                defaults.set(phone, forKey: Key.phone)
+                try await backend.verify(code: code, sentCode: sentCode, profile: profile)
+                persist()
                 phase = .permissions
             } catch {
                 signInError = error.localizedDescription
@@ -166,46 +267,66 @@ final class AppModel {
         }
     }
 
+    /// The only place the app asks for location and compass access.
     func requestPermissions() {
         compass.requestAuthorization()
         phase = .invite
     }
 
+    // MARK: - Invites
+
     func toggleInvite(_ id: String) {
         if selectedInvites.contains(id) { selectedInvites.remove(id) } else { selectedInvites.insert(id) }
     }
 
+    /// Inviting shares nothing. It asks — and only their acceptance starts a two-way share.
     func sendInvites() {
         let ids = Array(selectedInvites)
+        guard !ids.isEmpty else { return }
         isWorking = true
         Task {
             try? await backend.invite(ids)
-            for id in ids { mark(id, as: .pending) }
+            for id in ids { set(id, to: .invitedByMe) }
+            selectedInvites = []
             isWorking = false
-            phase = .inviteSent
+            if phase == .invite { phase = .inviteSent }
         }
     }
 
-    /// Everyone already sharing goes onto the dial, up to what 5b can show.
-    func openCompass() {
-        if trackedIDs.isEmpty {
-            trackedIDs = Array(sharingIDs.prefix(maxTracked))
+    /// Someone with no account yet: they get an SMS with a link, and appear once they join.
+    func inviteByPhone(_ phone: String) {
+        isWorking = true
+        Task {
+            do {
+                try await backend.inviteByPhone(phone)
+                signInError = nil
+            } catch {
+                signInError = error.localizedDescription
+            }
+            isWorking = false
         }
+    }
+
+    /// Accepting is the explicit, two-way act that starts sharing; declining shares nothing.
+    func respond(to contact: Contact, accept: Bool) {
+        Task { try? await backend.respond(to: contact.id, accept: accept) }
+        if accept {
+            set(contact.id, to: .sharing)
+            if trackedIDs.count < maxTracked { trackedIDs.append(contact.id) }
+            startFeed()
+        } else {
+            contacts.removeAll { $0.id == contact.id }
+        }
+        persist()
+    }
+
+    func openOrbit() {
+        if trackedIDs.isEmpty { trackedIDs = Array(sharingIDs.prefix(maxTracked)) }
         defaults.set(true, forKey: Key.onboarded)
         persist()
         startFeed()
-        phase = .compass
+        phase = .orbit
     }
-
-    func accept(_ contact: Contact) {
-        mark(contact.id, as: .sharing)
-        if trackedIDs.count < maxTracked { trackedIDs.append(contact.id) }
-        incomingRequest = nil
-        persist()
-        startFeed()
-    }
-
-    func decline() { incomingRequest = nil }
 
     // MARK: - Tracking
 
@@ -216,6 +337,7 @@ final class AppModel {
             trackedIDs.append(id)
         }
         persist()
+        publishSnapshot(force: true)
     }
 
     func isAtCapacity(_ id: String) -> Bool {
@@ -224,31 +346,38 @@ final class AppModel {
 
     /// Start over — the flow is worth being able to replay.
     func resetOnboarding() {
-        [Key.onboarded, Key.phone, Key.tracked, Key.contacts].forEach(defaults.removeObject(forKey:))
+        [Key.onboarded, Key.profile, Key.tracked, Key.contacts].forEach(defaults.removeObject(forKey:))
         trackedIDs = []
         selectedInvites = []
+        contacts = []
         code = ""
-        Task { contacts = await backend.contacts() }
+        profile = Profile(phone: "+1 415 555 0134")
+        usernameState = .empty
+        hasMatchedContacts = false
+        loadDirectory()
         phase = .launch
     }
 
     // MARK: - Persistence
 
-    private func mark(_ id: String, as status: Contact.Status) {
+    private func set(_ id: String, to relation: Contact.Relation) {
         guard let index = contacts.firstIndex(where: { $0.id == id }) else { return }
-        contacts[index].status = status
+        contacts[index].relation = relation
         persist()
     }
 
     private func persist() {
         defaults.set(trackedIDs, forKey: Key.tracked)
-        if let data = try? JSONEncoder().encode(contacts) {
-            defaults.set(data, forKey: Key.contacts)
-        }
+        if let data = try? JSONEncoder().encode(contacts) { defaults.set(data, forKey: Key.contacts) }
+        if let data = try? JSONEncoder().encode(profile) { defaults.set(data, forKey: Key.profile) }
     }
 
     private func restore() {
-        if let saved = defaults.string(forKey: Key.phone) { phone = saved }
+        if let data = defaults.data(forKey: Key.profile),
+           let saved = try? JSONDecoder().decode(Profile.self, from: data) {
+            profile = saved
+            usernameState = saved.username.isEmpty ? .empty : .available
+        }
         trackedIDs = defaults.stringArray(forKey: Key.tracked) ?? []
         if let data = defaults.data(forKey: Key.contacts),
            let saved = try? JSONDecoder().decode([Contact].self, from: data) {
@@ -258,16 +387,26 @@ final class AppModel {
 
     var hasOnboarded: Bool { defaults.bool(forKey: Key.onboarded) }
 
-    /// The widgets redraw from this. Writing it on every fix would wake the widget process far
-    /// more often than a home screen can show, so it is throttled to once a minute.
-    private func publishSnapshot() {
-        guard Date().timeIntervalSince(lastSnapshotWrite) > 60 else { return }
-        lastSnapshotWrite = Date()
-        let people = model.tracked.prefix(2).map {
-            OrbitSnapshot.Person(id: $0.id, name: $0.name, initial: $0.initial,
-                                 bearing: $0.bearing, distanceM: $0.distanceM)
+    /// The widgets redraw from this. Written whenever the dial has materially changed — a new
+    /// bearing, a new distance, someone added or dropped — rather than on a fixed clock, so a
+    /// widget is never more than one fix behind while the app is open.
+    private func publishSnapshot(force: Bool = false) {
+        let people = model.tracked.prefix(2).map { friend in
+            OrbitSnapshot.Person(id: friend.id, name: friend.name, initial: friend.initial,
+                                 bearing: friend.bearing, distanceM: friend.distanceM,
+                                 course: motion[friend.id]?.course,
+                                 speedMps: motion[friend.id]?.speed ?? 0)
         }
         guard !people.isEmpty else { return }
-        OrbitShared.write(OrbitSnapshot(heading: Double(compass.wholeHeading), people: Array(people)))
+
+        let snapshot = OrbitSnapshot(heading: Double(compass.wholeHeading), people: Array(people))
+        let elapsed = Date().timeIntervalSince(lastSnapshotWrite)
+        // WidgetKit budgets reloads, so only a change a viewer could actually see is worth one.
+        guard force || snapshot.differsMeaningfully(from: lastSnapshot) || elapsed > 300 else { return }
+        guard force || elapsed > 15 else { return }
+
+        lastSnapshot = snapshot
+        lastSnapshotWrite = Date()
+        OrbitShared.write(snapshot)
     }
 }

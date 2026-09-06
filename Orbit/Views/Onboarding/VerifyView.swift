@@ -25,7 +25,7 @@ struct VerifyView: View {
                     .tightHeading(40)
                     .foregroundStyle(OrbitColor.ink)
 
-                Text("Sent to \(model.phone)")
+                Text("Sent to \(model.profile.phone)")
                     .font(OrbitFont.regular(15))
                     .foregroundStyle(OrbitColor.neutral700)
                     .padding(.top, 16)

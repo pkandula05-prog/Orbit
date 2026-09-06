@@ -9,6 +9,9 @@ struct OrbitMark: View {
     var track: Color = OrbitColor.neutral300
 
     /// Everything below is in the 172-unit square the icon was drawn in.
+    /// The dots sit on the ring's centre line, so half a dot hangs outside the ring's own
+    /// bounds. Drawing into a padded square keeps them whole instead of shaved by the frame.
+    private static let bleed: CGFloat = 8
     private static let box: CGFloat = 172
     private static let radius: CGFloat = 78
     private static let stroke: CGFloat = 16
@@ -19,8 +22,9 @@ struct OrbitMark: View {
 
     var body: some View {
         Canvas { context, size in
-            let scale = min(size.width, size.height) / Self.box
+            let scale = min(size.width, size.height) / (Self.box + Self.bleed * 2)
             context.scaleBy(x: scale, y: scale)
+            context.translateBy(x: Self.bleed, y: Self.bleed)
             Self.draw(in: &context, ground: ground, track: track)
         }
         .frame(width: size, height: size)

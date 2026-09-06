@@ -5,8 +5,8 @@ import SwiftUI
 struct InviteSentView: View {
     @Environment(AppModel.self) private var model
 
-    private var pending: [Contact] { model.contacts.filter { $0.status == .pending } }
-    private var accepted: [Contact] { model.contacts.filter { $0.status == .sharing } }
+    private var pending: [Contact] { model.contacts.filter { $0.relation == .invitedByMe } }
+    private var accepted: [Contact] { model.contacts.filter { $0.relation == .sharing } }
     private var listed: [Contact] { pending + accepted.prefix(max(0, 3 - pending.count)) }
 
     private var headline: String {
@@ -41,13 +41,13 @@ struct InviteSentView: View {
                     ListRow(isFirst: offset == 0, minHeight: 60) {
                         HStack(spacing: 14) {
                             InitialBadge(initial: contact.initial, size: 20,
-                                         fill: contact.status == .sharing ? OrbitColor.onTarget : OrbitColor.red,
+                                         fill: contact.relation == .sharing ? OrbitColor.onTarget : OrbitColor.red,
                                          fontSize: 11)
                             Text(contact.name)
                                 .font(OrbitFont.semibold(16))
                                 .foregroundStyle(OrbitColor.ink)
                             Spacer(minLength: 8)
-                            if contact.status == .sharing {
+                            if contact.relation == .sharing {
                                 Text("Accepted").caps(10, OrbitColor.onTarget)
                             } else {
                                 OrbitTag(title: "Pending")
@@ -76,7 +76,7 @@ struct InviteSentView: View {
             Spacer(minLength: 24)
 
             VStack(spacing: 12) {
-                OrbitButton(title: "Open compass") { model.openCompass() }
+                OrbitButton(title: "Open orbit") { model.openOrbit() }
                 OrbitButton(title: "Invite more", kind: .ghost) { model.phase = .invite }
             }
             .padding(.bottom, 46)

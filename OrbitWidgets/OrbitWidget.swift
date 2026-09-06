@@ -6,10 +6,18 @@ struct OrbitEntry: TimelineEntry {
     let snapshot: OrbitSnapshot
 }
 
-/// The widget draws whatever dial the app last wrote to the shared container. It cannot read
-/// the compass itself — an extension is woken for a timeline, not run continuously — so the
-/// heading here is the last one you saw, not a live one.
+/// The widget draws the dial the app last wrote to the shared container. An extension is woken
+/// for a timeline rather than run continuously, so it cannot read the compass live — but it is
+/// not stuck on one still frame either: the app writes each friend's course and speed with
+/// their fix, and the timeline carries a minute-by-minute projection of where that motion
+/// takes them. Between reloads the marker keeps travelling and the delta keeps counting, and
+/// the app pushes a fresh timeline whenever the real dial moves enough to notice.
 struct OrbitProvider: TimelineProvider {
+    /// One entry a minute for a quarter of an hour; WidgetKit budgets reloads, so the entries
+    /// do the moving in between.
+    private let step: TimeInterval = 60
+    private let entries = 15
+
     func placeholder(in context: Context) -> OrbitEntry {
         OrbitEntry(date: Date(), snapshot: .placeholder)
     }
@@ -19,9 +27,18 @@ struct OrbitProvider: TimelineProvider {
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<OrbitEntry>) -> Void) {
-        let entry = OrbitEntry(date: Date(), snapshot: OrbitShared.read() ?? .placeholder)
-        // The app reloads us whenever it has a materially newer dial; this is only the floor.
-        completion(Timeline(entries: [entry], policy: .after(Date().addingTimeInterval(15 * 60))))
+        let now = Date()
+        let snapshot = OrbitShared.read() ?? .placeholder
+        // Everyone is carried forward along their own course, from the moment the fix was
+        // taken — so an entry shown ten minutes from now is ten minutes of travel, not a repeat.
+        let age = max(0, now.timeIntervalSince(snapshot.capturedAt))
+        let timeline = (0..<entries).map { index in
+            let ahead = Double(index) * step
+            return OrbitEntry(date: now.addingTimeInterval(ahead),
+                              snapshot: snapshot.projected(bySeconds: age + ahead))
+        }
+        completion(Timeline(entries: timeline,
+                            policy: .after(now.addingTimeInterval(Double(entries) * step))))
     }
 }
 
@@ -116,9 +133,12 @@ private struct MediumWidget: View {
                 Text(person.name)
                     .font(OrbitFont.semibold(13))
                     .foregroundStyle(OrbitColor.ink)
-                Text(Geo.formatDistance(person.distanceM))
-                    .font(OrbitFont.mono(10, weight: .regular))
-                    .foregroundStyle(OrbitColor.neutral700)
+                HStack(spacing: 5) {
+                    Text(Geo.formatDistance(person.distanceM))
+                        .font(OrbitFont.mono(10, weight: .regular))
+                        .foregroundStyle(OrbitColor.neutral700)
+                    MovementMark(person: person)
+                }
             }
             Spacer(minLength: 6)
             Text(Geo.formatDelta(delta))
@@ -162,13 +182,32 @@ private struct LockScreenDial: View {
     }
 }
 
+/// Which way they are going, and whether that is toward you. The arrow points along their
+/// course; the word says what the distance is doing.
+private struct MovementMark: View {
+    var person: OrbitSnapshot.Person
+
+    var body: some View {
+        if let course = person.course, person.speedMps > 0.2 {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 8, weight: .bold))
+                    .rotationEffect(.degrees(course))
+                Text(person.closingSpeed > 0.2 ? "Closing" : "Away")
+                    .caps(8, person.closingSpeed > 0.2 ? OrbitColor.onTarget : OrbitColor.neutral700)
+            }
+            .foregroundStyle(person.closingSpeed > 0.2 ? OrbitColor.onTarget : OrbitColor.neutral700)
+        }
+    }
+}
+
 struct OrbitCompassWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: OrbitShared.widgetKind, provider: OrbitProvider()) { entry in
             OrbitWidgetView(entry: entry)
         }
         .configurationDisplayName("Orbit")
-        .description("The dial, and how far to turn to face the people you track.")
+        .description("The dial, how far to turn to face the people you track, and which way they are moving.")
         .supportedFamilies([.systemSmall, .systemMedium, .accessoryCircular])
     }
 }

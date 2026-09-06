@@ -46,9 +46,10 @@ final class DeviceCompass: NSObject {
         authorization = manager.authorizationStatus
     }
 
+    /// Starts the dial, not the permission. Nothing is asked for here — the flow only prompts
+    /// on the location access screen, so launching the app never raises a system alert.
     func start() {
         guard link == nil else { return }
-        if authorization == .notDetermined { manager.requestWhenInUseAuthorization() }
         beginUpdates()
 
         let link = CADisplayLink(target: self, selector: #selector(step))
