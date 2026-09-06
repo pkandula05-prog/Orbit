@@ -30,7 +30,7 @@ true heading from the magnetometer. In the Simulator there is no magnetometer, s
 sweeps at a steady 7°/s — enough to review layout and watch the deltas and on-target colours
 change, but it is not a real bearing.
 
-Long-press the **Compass** title on the dial to replay the onboarding flow from the start.
+Long-press the **Orbit** title on the dial to replay the onboarding flow from the start.
 
 ## The flow
 
@@ -45,10 +45,10 @@ map:
 | 03 | Your number | `Views/Onboarding/SignInView.swift` |
 | 04 | Enter the code | `Views/Onboarding/VerifyView.swift` |
 | 05 | Two permissions | `Views/Onboarding/PermissionsView.swift` |
-| 06 | Invite friends | `Views/Onboarding/InviteView.swift` |
+| 06 | Friends and invites | `Views/Friends/FriendsView.swift` |
 | 07 | Invites out | `Views/Onboarding/InviteSentView.swift` |
-| 08 | Sharing request | `Views/Onboarding/ShareRequestView.swift` |
-| 09 / 5a / 5b | Compass face | `Views/Compass/CompassFaceView.swift` |
+| 08 | Sharing request | `Views/Friends/InvitesView.swift` (the bell's inbox) |
+| 09 / 5a / 5b | Orbit (the dial) | `Views/Compass/CompassFaceView.swift` |
 | 6a / 6b / 6c | Widgets | `OrbitWidgets/OrbitWidget.swift` |
 
 `5a` and `5b` are the same screen at different roster sizes, so the app switches on the tracked
@@ -102,21 +102,49 @@ If you want Find My-*like* behaviour, the shape that actually works is friends r
 opting into sharing, posting their own fixes to a backend you host, which then serves the
 endpoint above. Everything on the client is already written against that.
 
-## Sign-in and invites
+## Sign-in, friends and invites
 
-There is no Orbit server in this repository, so `LocalAccountStore` stands in for one behind the
-`AccountBackend` protocol: any six digits verify, invitations go out as *pending*, the artboard
-roster is already sharing, and one invitee accepts a few seconds later so the "waiting on them"
-state resolves in front of you. State persists to the App Group, so the flow is only walked
-once per install. Swapping in a real backend means writing one more conformance to
-`AccountBackend` and choosing it in `OrbitApp` — no screen changes.
+There is no Orbit server in this repository, so `LocalAccountStore` stands in for one behind
+the `AccountBackend` protocol (`Orbit/Services/AccountService.swift`). Swapping in a real
+backend means one more conformance and a line in `OrbitApp` — no screen changes. The contract
+each method stands for:
+
+| Call | Endpoint | Behaviour the client relies on |
+| --- | --- | --- |
+| `isUsernameAvailable` | `POST /username/check` | `{ "username": "ana" }` → `{ "available": false }`. Case-insensitive, unreserved, and **not** authoritative: the server must re-check at verify and reject a race with `409 username_taken`. |
+| `sendCode` | `POST /auth/code` | `{ "phone": "+14155550134" }` → `{ "sent": true }`. Rate-limit per number. |
+| `verify` | `POST /auth/verify` | `{ "phone", "code", "profile": { firstName, lastName, username } }` → session token; creates the account. Enforces username uniqueness here, not only at check time. |
+| `match` | `POST /contacts/match` | `{ "hashes": ["<sha256(e164 + salt)>"] }` → the accounts that matched. Send hashes, never the address book in the clear, and never store the ones that miss. |
+| `invites` | `GET /invites` | Both directions: `{ "incoming": [...], "outgoing": [...] }`. |
+| `invite` | `POST /invites` | `{ "userIds": [...] }` → pending. **Creates no sharing relationship.** |
+| `inviteByPhone` | `POST /invites/sms` | `{ "phone": "+1..." }` → sends an invite link to someone with no account; the relationship is created when they join and accept. |
+| `respond` | `POST /invites/{id}/respond` | `{ "accept": true }` → sharing becomes mutual, in both directions, and both parties are notified. `false` shares nothing and tells the sender nothing beyond a decline. |
+| `events` | SSE `GET /events` or a socket | `invited` and `accepted` pushes, so the bell's badge and the dial update without a poll. |
+
+**Sharing is never implied.** Being matched from an address book, sending an invite, or
+receiving one puts nobody on anybody's dial. `Contact.Relation.sharing` is the only state that
+carries a location, and it is reached solely through `respond(to:accept: true)` — the server
+must hold the same invariant, and should reject any location read for a pair that is not
+mutually sharing.
+
+Contacts are read only when someone taps **Match contacts** on the friends page
+(`ContactsAccess.requestAndFetch`), and location and compass access are asked for only on the
+permissions screen (05). Launching the app raises no system prompt.
 
 ## Widgets
 
 `OrbitWidgets` ships all three widget artboards from one `Widget`: small (6a), medium (6b) and
 lock-screen circular (6c). A widget cannot read the compass — an extension is woken for a
-timeline, not run continuously — so the app writes the last dial it drew into the App Group and
-the widgets render that. The heading on a widget is the last one you saw, not a live one.
+timeline, not run continuously — so the app writes the dial into the App Group and the widgets
+render that.
+
+They are not stuck on one still frame, though. Each fix is compared against the previous one to
+get that friend's **course and speed**, which travel with the snapshot; the timeline then
+carries a minute-by-minute projection of where that motion takes them, so between reloads the
+marker keeps moving and the delta keeps counting. Each row shows which way they are heading and
+whether they are closing on you. The app pushes a fresh timeline whenever the real dial moves
+enough to be worth one — two degrees of bearing, or 25 metres — rather than on a fixed clock.
+The device heading is still the last one the app saw: only the app can read the magnetometer.
 
 WidgetKit archives a widget's view tree and replays it out of process, where `Canvas` cannot be
 relied on to draw, so `Shared/StaticDialView.swift` builds the same dial from shapes. Both read
