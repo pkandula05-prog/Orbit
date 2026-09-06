@@ -36,8 +36,11 @@ final class DeviceCompass: NSObject {
     /// Fired when the whole degree changes — a few times a second, not per frame. The Live
     /// Activity rides on this, so the Lock Screen turns when the dial does.
     var onHeadingChange: ((Int) -> Void)?
-    /// Every new fix, with the course and speed CoreLocation already worked out for us.
+    /// Every new fix: coordinate, course, horizontal accuracy.
     var onLocationChange: ((CLLocationCoordinate2D, Double?, Double?) -> Void)?
+    /// True while the app is in front, which is the only time the dial is being read — and so
+    /// the only time it is worth paying for precise, frequent fixes.
+    private(set) var isForeground = true
 
     private let manager = CLLocationManager()
     private var link: CADisplayLink?
@@ -78,9 +81,24 @@ final class DeviceCompass: NSObject {
         manager.requestWhenInUseAuthorization()
     }
 
-    /// Asked for only when a Live Activity starts, and only as an escalation from
-    /// when-in-use: without it the dial on the Lock Screen stops the moment the phone goes
-    /// in a pocket, which is exactly when it is worth having.
+    /// Publishing and viewing are separate concerns, and this is the switch between them.
+    ///
+    /// Viewing is foreground-only — heading is foreground-only anyway. Publishing has to
+    /// continue in a pocket, or everyone in the orbit goes stale the moment they stop looking,
+    /// which defeats the point. So an active orbit turns on background updates, and the end of
+    /// the last orbit turns location off entirely.
+    func setPublishing(_ publishing: Bool) {
+        if publishing {
+            requestBackgroundUpdates()
+            manager.startUpdatingLocation()
+            manager.startMonitoringSignificantLocationChanges()
+        } else {
+            manager.stopMonitoringSignificantLocationChanges()
+            manager.allowsBackgroundLocationUpdates = false
+        }
+    }
+
+    /// Escalated from when-in-use only when an orbit starts, never on launch.
     func requestBackgroundUpdates() {
         guard authorization == .authorizedWhenInUse else {
             enableBackgroundUpdatesIfAllowed()
@@ -102,6 +120,13 @@ final class DeviceCompass: NSObject {
         if CLLocationManager.headingAvailable() {
             manager.startUpdatingHeading()
         }
+    }
+
+    /// The app tells us which side of the foreground line it is on; the fix rate follows.
+    func setForeground(_ foreground: Bool) {
+        isForeground = foreground
+        manager.desiredAccuracy = foreground ? kCLLocationAccuracyBest : kCLLocationAccuracyHundredMeters
+        manager.distanceFilter = foreground ? kCLDistanceFilterNone : 25
     }
 
     @objc private func step(_ link: CADisplayLink) {
@@ -155,7 +180,7 @@ extension DeviceCompass: CLLocationManagerDelegate {
             altitude = last.verticalAccuracy >= 0 ? last.altitude : nil
             onLocationChange?(last.coordinate,
                               last.course >= 0 ? last.course : nil,
-                              last.speed >= 0 ? last.speed : nil)
+                              last.horizontalAccuracy >= 0 ? last.horizontalAccuracy : nil)
         }
     }
 

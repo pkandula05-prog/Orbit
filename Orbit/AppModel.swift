@@ -2,428 +2,281 @@ import CoreLocation
 import Observation
 import SwiftUI
 
-/// Where the flow is. Artboards 02–09 are steps of one journey, not separate destinations, so
-/// the app holds the step rather than pushing routes.
+/// Where the app is. There is no account wall: permissions, then a dial — empty until you start
+/// or join an orbit.
 enum Phase: Equatable {
-    case launch      // 02
-    case signIn      // 03
-    case verify      // 04
-    case permissions // 05
-    case invite      // 06
-    case inviteSent  // 07
-    case orbit       // 09 / 5a / 5b
+    case launch
+    case permissions
+    /// No orbit. One action: start one.
+    case idle
+    /// In an orbit, watching the dial.
+    case orbit
+    /// It is over, and says so. An empty dial would read as "still going, nobody here".
+    case ended(OrbitSession.Ending)
 }
-
-/// 5b's readout only has room for a 2×2 grid — four is the most the dial can show clearly.
-let maxTracked = 4
-/// Three or more tracked friends switches the readout to the 5b layout.
-let denseThreshold = 3
 
 @MainActor
 @Observable
 final class AppModel {
-    enum UsernameState: Equatable {
-        case empty, invalid, checking, available, taken
-    }
-
     var phase: Phase = .launch
 
-    var profile = Profile(phone: "+1 415 555 0134")
-    var agreedToTerms = true
-    var usernameState: UsernameState = .empty
-    var code = ""
-    var signInError: String?
+    private(set) var session: OrbitSession?
+    private(set) var participants: [Participant] = []
+    private(set) var fixes: [String: ParticipantFix] = [:]
+
+    /// Asked for at the moment of creating or joining, never before.
+    var displayName = ""
+    /// A link tapped before we had a name; held until the name sheet is answered.
+    var pendingToken: String?
+    var error: String?
     var isWorking = false
 
-    var contacts: [Contact] = []
-    var selectedInvites: Set<String> = []
-    var trackedIDs: [String] = []
-    /// Whether the address book has been matched — the friends page asks, nothing else does.
-    var hasMatchedContacts = false
-    var contactsDenied = false
-
-    /// Sheets over the dial: the invite inbox and the friends page.
-    var showingInvites = false
-    var showingFriends = false
+    /// Which four rows the readout is showing, when there are more than four.
+    var readoutPage = 0
+    var showingParticipants = false
+    /// Announcements: joins and departures, by name.
+    var notice: String?
 
     let compass = DeviceCompass()
-    /// The Lock Screen / Dynamic Island dial. This is the only surface outside the app that
-    /// can follow you in real time.
-    let live = LiveDial()
-    private(set) var friends: [FriendLocation] = []
+    private let service: OrbitService
+    private var updateTask: Task<Void, Never>?
+    private var expiryTask: Task<Void, Never>?
+    private var knownParticipantIDs: Set<String> = []
+    private var lastPublished = Date.distantPast
 
-    private let backend: AccountBackend
-    private let publisher = LocationPublisher()
-    private var sentCode = ""
-    private var feedTask: Task<Void, Never>?
-    private var eventTask: Task<Void, Never>?
-    private var usernameTask: Task<Void, Never>?
-    private var searchTask: Task<Void, Never>?
     private let defaults = UserDefaults.standard
     private enum Key {
-        static let onboarded = "orbit.onboarded"
-        static let profile = "orbit.profile"
-        static let tracked = "orbit.tracked"
-        static let contacts = "orbit.contacts"
+        static let name = "orbit.displayName"
+        /// Only the last positions seen, so a cold open has something to draw.
+        static let lastFixes = "orbit.lastFixes"
     }
 
-    /// Supabase when the project is configured, the local stand-in when it is not — so the
-    /// app still runs, and still demos, with no keys filled in.
-    init(backend: AccountBackend? = nil) {
-        self.backend = backend ?? SupabaseService.shared.map(SupabaseAccountBackend.init) ?? LocalAccountStore()
-        restore()
+    init(service: OrbitService? = nil) {
+        self.service = service ?? SupabaseService.shared.map(SupabaseOrbitService.init) ?? LocalOrbitService()
+        displayName = defaults.string(forKey: Key.name) ?? ""
+        restoreLastFixes()
     }
 
     // MARK: - Model
 
     /// Rebuilt on the whole-degree heading rather than the drawn angle: the numbers only ever
-    /// show whole degrees, so there is nothing to gain from recomputing them 120 times a
-    /// second, and plenty to lose.
-    var model: CompassModel {
-        CompassModel(friends: friends,
-                     origin: compass.coordinate ?? MockFriendSource.demoOrigin,
-                     heading: Double(compass.wholeHeading),
-                     trackedIDs: trackedIDs)
+    /// show whole degrees, so there is nothing to gain from recomputing them 120 times a second.
+    var model: OrbitModel {
+        guard let origin = compass.coordinate else { return OrbitModel() }
+        return OrbitModel(participants: participants, fixes: fixes, origin: origin,
+                          heading: Double(compass.wholeHeading))
     }
 
-    var dense: Bool { trackedIDs.count >= denseThreshold }
-
-    var headerRight: String {
-        guard let altitude = compass.altitude else { return "\(trackedIDs.count) tracked" }
-        return "Alt \(Int(altitude.rounded())) m"
+    /// Nudged apart where people are crowded, so six dots in one direction stay countable.
+    var markers: [DialMarker] {
+        DialMarker.resolvingCrowding(model.readings.map(DialMarker.init))
     }
 
-    /// People who asked to share with you and are still waiting on an answer. Nothing of yours
-    /// is shared with them until you accept.
-    var incomingInvites: [Contact] { contacts.filter { $0.relation == .invitedMe } }
+    /// Four at a time, ordered by how far you would have to turn. Tapping pages through.
+    var visibleRows: [ParticipantReading] {
+        let rows = model.readoutRows
+        guard rows.count > 4 else { return rows }
+        let start = (readoutPage * 4) % rows.count
+        return Array((rows + rows)[start..<(start + 4)])
+    }
 
-    /// Only people you and they have both agreed to share with are on the dial.
-    private var sharingIDs: [String] { contacts.filter { $0.relation == .sharing }.map(\.id) }
+    var canPageReadout: Bool { model.readoutRows.count > 4 }
+
+    var activeCount: Int { participants.filter { !$0.hasLeft }.count }
+    var isHost: Bool { participants.first { $0.isSelf }?.isHost ?? false }
+    var isFull: Bool { activeCount >= OrbitSession.maxParticipants }
+
+    var timeRemaining: String {
+        guard let session else { return "" }
+        let seconds = max(0, session.expiresAt.timeIntervalSinceNow)
+        if seconds >= 3600 { return "\(Int(seconds / 3600))h \(Int(seconds.truncatingRemainder(dividingBy: 3600) / 60))m left" }
+        return "\(Int(seconds / 60))m left"
+    }
 
     // MARK: - Lifecycle
 
     func start() {
         compass.start()
-        // Every whole degree, not every frame: enough to look continuous, cheap enough to push.
-        compass.onHeadingChange = { [weak self] _ in self?.pushLive() }
-        compass.onLocationChange = { [weak self] coordinate, course, speed in
-            guard let self else { return }
-            // Your own position goes up only if somebody has been accepted to see it.
-            self.publisher.publish(coordinate, course: course, speed: speed,
-                                   hasFriends: !self.sharingIDs.isEmpty)
+        compass.onLocationChange = { [weak self] coordinate, _, accuracy in
+            self?.publish(coordinate, accuracy: accuracy)
         }
-        if contacts.isEmpty { loadDirectory() }
-        startFeed()
-        listenForEvents()
+        Task { try? await service.ensureIdentity() }
     }
 
-    /// Without contacts access there is still the invite inbox and search, so the page is never
-    /// empty and the permission stays optional.
-    private func loadDirectory() {
-        Task {
-            let invites = (try? await backend.invites()) ?? []
-            merge(invites)
+    /// A link tapped from anywhere: `orbit://join/<token>` or an https link ending in the token.
+    func handle(_ url: URL) {
+        let token = url.lastPathComponent
+        guard !token.isEmpty, token != "/" else { return }
+        guard !displayName.isEmpty else {
+            pendingToken = token
+            return
         }
+        join(token: token)
     }
 
-    /// Search the directory for anyone not already in the roster — the way to find someone
-    /// without handing over an address book.
-    func search(_ term: String) {
-        searchTask?.cancel()
-        guard term.count >= 2 else { return }
-        searchTask = Task {
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else { return }
-            merge((try? await backend.search(term)) ?? [])
+    func create(hours: Int) {
+        guard !displayName.isEmpty else { error = OrbitError.needsName.errorDescription; return }
+        run {
+            let session = try await self.service.create(hours: hours, displayName: self.displayName)
+            self.enter(session)
         }
     }
 
-    func matchContacts() {
-        Task {
-            guard let phones = await ContactsAccess.requestAndFetch() else {
-                contactsDenied = true
-                return
-            }
-            hasMatchedContacts = true
-            contactsDenied = false
-            merge((try? await backend.match(phones: phones)) ?? [])
+    func join(token: String) {
+        guard !displayName.isEmpty else { pendingToken = token; return }
+        run {
+            let session = try await self.service.join(token: token, displayName: self.displayName)
+            self.enter(session)
         }
     }
 
-    /// Adds people we did not already know about, and never downgrades a relation we hold.
-    private func merge(_ incoming: [Contact]) {
-        for contact in incoming {
-            if let index = contacts.firstIndex(where: { $0.id == contact.id }) {
-                if contacts[index].relation == .none { contacts[index].relation = contact.relation }
-                contacts[index].isOnOrbit = contact.isOnOrbit
-            } else {
-                contacts.append(contact)
-            }
-        }
-        persist()
+    func extend(hours: Int) {
+        guard let session else { return }
+        run { self.session = try await self.service.extend(session, hours: hours) }
     }
 
-    private func startFeed() {
-        feedTask?.cancel()
-        // Names are held here rather than joined on every position: the roster is already
-        // known, and the feed only carries ids and coordinates.
-        let names = Dictionary(uniqueKeysWithValues: contacts.map {
-            ($0.id, (name: $0.shortName, initial: $0.initial))
-        })
-        let source = Self.makeSource(origin: { [fix = compass.lastFix] in
-            fix.coordinate ?? MockFriendSource.demoOrigin
-        }, visible: sharingIDs, names: names)
+    func regenerateLink() {
+        guard let session else { return }
+        run { self.session = try await self.service.regenerateLink(session) }
+    }
 
-        feedTask = Task { [weak self] in
-            for await batch in source.stream() {
+    /// One tap, and it does not end the orbit for anyone else.
+    func leave() {
+        guard let session else { return }
+        Task { try? await self.service.leave(session) }
+        finish(.endedByHost)
+    }
+
+    /// The host ending it ends it for everyone — the orbit belongs to whoever started it.
+    func endForEveryone() {
+        guard let session else { return }
+        Task { try? await self.service.end(session) }
+        finish(.endedByHost)
+    }
+
+    func dismissEnded() {
+        phase = .idle
+        session = nil
+        participants = []
+        fixes = [:]
+    }
+
+    private func enter(_ session: OrbitSession) {
+        self.session = session
+        knownParticipantIDs = []
+        defaults.set(displayName, forKey: Key.name)
+        pendingToken = nil
+        phase = .orbit
+        listen(to: session)
+        watchExpiry()
+    }
+
+    private func finish(_ ending: OrbitSession.Ending) {
+        updateTask?.cancel()
+        expiryTask?.cancel()
+        // Publishing stops the moment the orbit does — no orbit, no location updates at all.
+        compass.setPublishing(false)
+        phase = .ended(ending)
+    }
+
+    private func listen(to session: OrbitSession) {
+        updateTask?.cancel()
+        // Background updates are asked for here, in the context of joining, and nowhere else.
+        compass.setPublishing(true)
+
+        updateTask = Task { [weak self] in
+            for await update in service.updates(for: session) {
                 guard let self, !Task.isCancelled else { return }
-                self.friends = batch
-                self.pushLive()
-            }
-        }
-    }
-
-    /// A real feed reports real coordinates and ignores `origin`; only the mock uses it.
-    private static func makeSource(origin: @escaping @Sendable () -> CLLocationCoordinate2D,
-                                   visible: [String],
-                                   names: [String: (name: String, initial: String)]) -> FriendSource {
-        if let client = SupabaseService.shared {
-            return SupabaseFriendSource(client: client) { names[$0] }
-        }
-        if let raw = Bundle.main.object(forInfoDictionaryKey: "OrbitFeedURL") as? String,
-           !raw.isEmpty, let url = URL(string: raw) {
-            let token = Bundle.main.object(forInfoDictionaryKey: "OrbitFeedToken") as? String
-            return RESTFriendSource(endpoint: url, token: token?.isEmpty == false ? token : nil)
-        }
-        return MockFriendSource(origin: origin, visible: visible)
-    }
-
-    private func listenForEvents() {
-        eventTask?.cancel()
-        eventTask = Task { [weak self, backend] in
-            for await event in backend.events() {
-                guard let self, !Task.isCancelled else { return }
-                switch event {
-                case .invited(let contact): self.merge([contact])
-                case .accepted(let contact):
-                    self.set(contact.id, to: .sharing)
-                    self.startFeed()
+                switch update {
+                case .participants(let roster): self.apply(roster)
+                case .fixes(let list):
+                    for fix in list { self.fixes[fix.participantID] = fix }
+                    self.saveLastFixes()
+                case .session(let fresh):
+                    self.session = fresh
+                    if let ending = fresh.ending { self.finish(ending) }
                 }
             }
         }
     }
 
-    // MARK: - Sign in
+    /// Joins and departures are announced by name. A stranger on the link should be
+    /// conspicuous, and a silent exit sends people walking toward somebody who has gone.
+    private func apply(_ roster: [Participant]) {
+        let live = Set(roster.filter { !$0.hasLeft && !$0.isSelf }.map(\.id))
 
-    /// Debounced so a check goes out per pause in typing, not per keystroke.
-    func usernameChanged() {
-        usernameTask?.cancel()
-        let username = profile.username.lowercased()
-        profile.username = username
-
-        guard !username.isEmpty else { usernameState = .empty; return }
-        guard Profile.isValidUsername(username) else { usernameState = .invalid; return }
-
-        usernameState = .checking
-        usernameTask = Task {
-            try? await Task.sleep(for: .milliseconds(400))
-            guard !Task.isCancelled else { return }
-            let available = (try? await backend.isUsernameAvailable(username)) ?? false
-            guard !Task.isCancelled, profile.username.lowercased() == username else { return }
-            usernameState = available ? .available : .taken
+        if !knownParticipantIDs.isEmpty {
+            let arrived = live.subtracting(knownParticipantIDs)
+            let gone = knownParticipantIDs.subtracting(live)
+            if let id = arrived.first, let who = roster.first(where: { $0.id == id }) {
+                announce("\(who.displayName) joined")
+            } else if let id = gone.first, let who = roster.first(where: { $0.id == id }) {
+                announce("\(who.displayName) left")
+            }
         }
+
+        knownParticipantIDs = live
+        participants = roster
     }
 
-    var canSendCode: Bool {
-        profile.isComplete && agreedToTerms && usernameState == .available
-    }
-
-    func sendCode() {
-        guard agreedToTerms else {
-            signInError = "Agree to the terms and privacy notice to continue."
-            return
-        }
-        guard usernameState != .taken else {
-            signInError = AccountError.usernameTaken.errorDescription
-            return
-        }
-        guard profile.isComplete else {
-            signInError = AccountError.incompleteProfile.errorDescription
-            return
-        }
-        signInError = nil
-        isWorking = true
+    private func announce(_ text: String) {
+        notice = text
         Task {
-            do {
-                sentCode = try await backend.sendCode(to: profile.phone)
-                code = ""
-                phase = .verify
-            } catch {
-                signInError = error.localizedDescription
+            try? await Task.sleep(for: .seconds(4))
+            if notice == text { notice = nil }
+        }
+    }
+
+    /// Expiry is the server's to enforce; this only keeps the countdown honest on screen and
+    /// closes the dial the moment the clock runs out.
+    private func watchExpiry() {
+        expiryTask?.cancel()
+        expiryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard let self, let session = self.session else { return }
+                if let ending = session.ending { self.finish(ending); return }
+            }
+        }
+    }
+
+    // MARK: - Publishing
+
+    /// Your position goes up only while you are in a live orbit, and no faster than the tier
+    /// boundaries need: often enough that nobody drifts into "degraded" while walking, slow
+    /// enough to be kind to the battery.
+    private func publish(_ coordinate: CLLocationCoordinate2D, accuracy: Double?) {
+        guard let session, session.isActive else { return }
+        let interval: TimeInterval = compass.isForeground ? 5 : 45
+        guard Date().timeIntervalSince(lastPublished) >= interval else { return }
+        lastPublished = Date()
+        Task { try? await service.publish(coordinate, accuracy: accuracy, in: session) }
+    }
+
+    private func run(_ work: @escaping () async throws -> Void) {
+        isWorking = true
+        error = nil
+        Task {
+            do { try await work() } catch {
+                self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
             isWorking = false
         }
     }
 
-    func verifyCode() {
-        signInError = nil
-        isWorking = true
-        Task {
-            do {
-                try await backend.verify(code: code, sentCode: sentCode, profile: profile)
-                persist()
-                phase = .permissions
-            } catch {
-                signInError = error.localizedDescription
-            }
-            isWorking = false
-        }
+    // MARK: - Cold open
+
+    /// Opening the app shows a blank ring for a moment while positions arrive. Drawing the last
+    /// ones we saw, greyed and marked stale, beats an empty dial: stale-but-labelled is
+    /// information, empty is not.
+    private func saveLastFixes() {
+        guard let data = try? JSONEncoder().encode(Array(fixes.values)) else { return }
+        defaults.set(data, forKey: Key.lastFixes)
     }
 
-    /// The only place the app asks for location and compass access.
-    func requestPermissions() {
-        compass.requestAuthorization()
-        phase = .invite
-    }
-
-    // MARK: - Invites
-
-    func toggleInvite(_ id: String) {
-        if selectedInvites.contains(id) { selectedInvites.remove(id) } else { selectedInvites.insert(id) }
-    }
-
-    /// Inviting shares nothing. It asks — and only their acceptance starts a two-way share.
-    func sendInvites() {
-        let ids = Array(selectedInvites)
-        guard !ids.isEmpty else { return }
-        isWorking = true
-        Task {
-            try? await backend.invite(ids)
-            for id in ids { set(id, to: .invitedByMe) }
-            selectedInvites = []
-            isWorking = false
-            if phase == .invite { phase = .inviteSent }
-        }
-    }
-
-    /// Someone with no account yet: they get an SMS with a link, and appear once they join.
-    func inviteByPhone(_ phone: String) {
-        isWorking = true
-        Task {
-            do {
-                try await backend.inviteByPhone(phone)
-                signInError = nil
-            } catch {
-                signInError = error.localizedDescription
-            }
-            isWorking = false
-        }
-    }
-
-    /// Accepting is the explicit, two-way act that starts sharing; declining shares nothing.
-    func respond(to contact: Contact, accept: Bool) {
-        Task { try? await backend.respond(to: contact.inviteID ?? contact.id, accept: accept) }
-        if accept {
-            set(contact.id, to: .sharing)
-            if trackedIDs.count < maxTracked { trackedIDs.append(contact.id) }
-            startFeed()
-        } else {
-            contacts.removeAll { $0.id == contact.id }
-        }
-        persist()
-    }
-
-    func openOrbit() {
-        if trackedIDs.isEmpty { trackedIDs = Array(sharingIDs.prefix(maxTracked)) }
-        defaults.set(true, forKey: Key.onboarded)
-        persist()
-        startFeed()
-        phase = .orbit
-        pushLive()
-    }
-
-    // MARK: - Tracking
-
-    func toggleTracked(_ id: String) {
-        if let index = trackedIDs.firstIndex(of: id) {
-            trackedIDs.remove(at: index)
-        } else if trackedIDs.count < maxTracked {
-            trackedIDs.append(id)
-        }
-        persist()
-        if trackedIDs.isEmpty { live.stop() } else { pushLive() }
-    }
-
-    func isAtCapacity(_ id: String) -> Bool {
-        !trackedIDs.contains(id) && trackedIDs.count >= maxTracked
-    }
-
-    /// Start over — the flow is worth being able to replay.
-    func resetOnboarding() {
-        [Key.onboarded, Key.profile, Key.tracked, Key.contacts].forEach(defaults.removeObject(forKey:))
-        trackedIDs = []
-        selectedInvites = []
-        contacts = []
-        code = ""
-        profile = Profile(phone: "+1 415 555 0134")
-        usernameState = .empty
-        hasMatchedContacts = false
-        loadDirectory()
-        phase = .launch
-    }
-
-    // MARK: - Persistence
-
-    private func set(_ id: String, to relation: Contact.Relation) {
-        guard let index = contacts.firstIndex(where: { $0.id == id }) else { return }
-        contacts[index].relation = relation
-        persist()
-    }
-
-    private func persist() {
-        defaults.set(trackedIDs, forKey: Key.tracked)
-        if let data = try? JSONEncoder().encode(contacts) { defaults.set(data, forKey: Key.contacts) }
-        if let data = try? JSONEncoder().encode(profile) { defaults.set(data, forKey: Key.profile) }
-    }
-
-    private func restore() {
-        if let data = defaults.data(forKey: Key.profile),
-           let saved = try? JSONDecoder().decode(Profile.self, from: data) {
-            profile = saved
-            usernameState = saved.username.isEmpty ? .empty : .available
-        }
-        trackedIDs = defaults.stringArray(forKey: Key.tracked) ?? []
-        if let data = defaults.data(forKey: Key.contacts),
-           let saved = try? JSONDecoder().decode([Contact].self, from: data) {
-            contacts = saved
-        }
-    }
-
-    var hasOnboarded: Bool { defaults.bool(forKey: Key.onboarded) }
-
-    /// The widgets redraw from this. Written whenever the dial has materially changed — a new
-    /// bearing, a new distance, someone added or dropped — rather than on a fixed clock, so a
-    /// widget is never more than one fix behind while the app is open.
-    /// The dial as the Live Activity wants it.
-    private func currentSnapshot() -> OrbitSnapshot? {
-        let people = model.tracked.prefix(2).map { friend in
-            OrbitSnapshot.Person(id: friend.id, name: friend.name, initial: friend.initial,
-                                 bearing: friend.bearing, distanceM: friend.distanceM)
-        }
-        guard !people.isEmpty else { return nil }
-        return OrbitSnapshot(heading: Double(compass.wholeHeading), people: Array(people))
-    }
-
-    /// Real time, as far as iOS allows: the activity is pushed on every whole degree and every
-    /// fix. This is the only surface outside the app that can keep up — a home screen widget
-    /// cannot read the compass and is reloaded on a daily budget, which is why there are none.
-    private func pushLive() {
-        guard phase == .orbit, let snapshot = currentSnapshot() else { return }
-        if live.isRunning {
-            live.update(with: snapshot)
-        } else {
-            live.start(with: snapshot)
-            compass.requestBackgroundUpdates()
-        }
+    private func restoreLastFixes() {
+        guard let data = defaults.data(forKey: Key.lastFixes),
+              let saved = try? JSONDecoder().decode([ParticipantFix].self, from: data) else { return }
+        fixes = Dictionary(uniqueKeysWithValues: saved.map { ($0.participantID, $0) })
     }
 }

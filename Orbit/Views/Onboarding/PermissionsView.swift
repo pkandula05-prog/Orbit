@@ -10,7 +10,7 @@ struct PermissionsView: View {
 
     private let permissions = [
         Permission(index: "01", title: "Location",
-                   detail: "To place your friends on the dial. Shared only with people you pick."),
+                   detail: "To place people on the dial while an orbit is running. Nothing is shared outside one."),
         Permission(index: "02", title: "Motion & compass",
                    detail: "To read which way you are facing. Never leaves the device."),
     ]
@@ -58,8 +58,11 @@ struct PermissionsView: View {
             Spacer(minLength: 24)
 
             VStack(spacing: 12) {
-                OrbitButton(title: "Allow both") { model.requestPermissions() }
-                OrbitButton(title: "Not now", kind: .ghost) { model.phase = .invite }
+                OrbitButton(title: "Allow both") {
+                    model.compass.requestAuthorization()
+                    model.phase = .idle
+                }
+                OrbitButton(title: "Not now", kind: .ghost) { model.phase = .idle }
             }
             .padding(.bottom, 46)
         }

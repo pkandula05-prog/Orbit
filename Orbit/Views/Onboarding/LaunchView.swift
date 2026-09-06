@@ -23,7 +23,7 @@ struct LaunchView: View {
                 .opacity(markIn ? 1 : 0)
                 .offset(y: markIn ? 0 : 8)
 
-            Text("Point at the people you know")
+            Text("Point at the people you are with")
                 .caps(11, OrbitColor.neutral700)
                 .padding(.top, 16)
                 .opacity(markIn ? 1 : 0)

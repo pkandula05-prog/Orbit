@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct OrbitApp: App {
     @State private var model = AppModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -10,13 +11,17 @@ struct OrbitApp: App {
                 .environment(model)
                 .preferredColorScheme(.light)
                 .task { model.start() }
+                // Viewing is foreground-only; publishing is not. The fix rate follows which
+                // side of that line the app is on.
+                .onChange(of: scenePhase) { _, phase in
+                    model.compass.setForeground(phase == .active)
+                }
+                .onOpenURL { model.handle($0) }
         }
     }
 }
 
-/// Artboards 02–09 are one journey, so the app animates between steps of a single view rather
-/// than pushing navigation destinations — which also keeps the dial's display link alive
-/// across the hand-off from onboarding.
+/// There is no account wall: permissions, then a dial. Everything else is an orbit's lifecycle.
 struct RootView: View {
     @Environment(AppModel.self) private var model
 
@@ -27,35 +32,32 @@ struct RootView: View {
             Group {
                 switch model.phase {
                 case .launch:
-                    LaunchView { model.phase = model.hasOnboarded ? .orbit : .signIn }
+                    LaunchView { model.phase = .permissions }
                         .transition(.opacity)
-                case .signIn:
-                    SignInView().transition(step)
-                case .verify:
-                    VerifyView().transition(step)
                 case .permissions:
                     PermissionsView().transition(step)
-                case .invite:
-                    FriendsView().transition(step)
-                case .inviteSent:
-                    InviteSentView().transition(step)
+                case .idle:
+                    IdleView().transition(step)
                 case .orbit:
-                    CompassFaceView()
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    OrbitFaceView().transition(.opacity.combined(with: .scale(scale: 0.98)))
+                case .ended(let ending):
+                    EndedOrbitView(ending: ending).transition(.opacity)
                 }
             }
             .animation(.spring(response: 0.5, dampingFraction: 0.9), value: model.phase)
 
+            // A link tapped before we knew what to call you.
+            if let token = model.pendingToken {
+                JoinNameView(token: token)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(1)
+            }
         }
-        .statusBarHidden(false)
+        .animation(.spring(response: 0.45, dampingFraction: 0.9), value: model.pendingToken)
     }
 
-    /// Forward is a step to the right, back a step to the left — the same motion the sign-in
-    /// counter describes.
     private var step: AnyTransition {
-        .asymmetric(
-            insertion: .move(edge: .trailing).combined(with: .opacity),
-            removal: .move(edge: .leading).combined(with: .opacity)
-        )
+        .asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
+                    removal: .move(edge: .leading).combined(with: .opacity))
     }
 }

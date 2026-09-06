@@ -82,6 +82,26 @@ public enum Geo {
         return sign + String(format: "%03d°", Int(abs(delta).rounded()))
     }
 
+    private static let points = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+    /// Eight-point bearing — what a distance gives you once degrees stop being actionable.
+    public static func compassPoint(_ bearing: Double) -> String {
+        points[Int((normalize(bearing) / 45).rounded()) % 8]
+    }
+
+    /// A band rather than a figure, for a fix too old to be precise about. Saying "1.4 km" of a
+    /// six-minute-old position claims an accuracy nobody has.
+    public static func bandedDistance(_ metres: Double) -> String {
+        switch metres {
+        case ..<200: "under 200 m"
+        case ..<500: "200–500 m"
+        case ..<1000: "500 m–1 km"
+        case ..<3000: "1–3 km"
+        case ..<10_000: "3–10 km"
+        default: "over 10 km"
+        }
+    }
+
     public static func formatDistance(_ metres: Double) -> String {
         guard metres.isFinite else { return "—" }
         if metres < 1000 { return "\(Int((metres / 10).rounded()) * 10) m" }

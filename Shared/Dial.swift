@@ -1,93 +1,87 @@
 import SwiftUI
 
 /// Everything is laid out in the artboards' 300-unit square and scaled to the view.
-public enum DialUnits {
-    public static let view: CGFloat = 300
-    public static let center = CGPoint(x: 150, y: 150)
+enum DialUnits {
+    static let view: CGFloat = 300
+    static let center = CGPoint(x: 150, y: 150)
+
+    static let trackRadius: CGFloat = 132
+    static let trackWidth: CGFloat = 8
+    static let markerRadius: CGFloat = 13
+    static let markerCenterY: CGFloat = 18
+    static let bodyRadius: CGFloat = 13.5
+    static let bodyCenterY: CGFloat = 18.9
+    /// Two markers closer than this on the ring are unreadable, so they get nudged apart.
+    static let minimumSeparation: Double = 11
 }
 
-/// The dial is drawn at four sizes across the app and the widgets; the parts that differ are
-/// only ever radii, weights and colours, so they live here rather than in four near-copies.
-public struct DialStyle: Sendable {
-    public var trackRadius: CGFloat
-    public var trackWidth: CGFloat
-    public var trackColor: Color
-    public var arcColor: Color
-    public var markerRadius: CGFloat
-    public var markerCenterY: CGFloat
-    public var markerStroke: CGFloat
-    public var markerFill: Color
-    public var markerLabelSize: CGFloat
-    /// Nil hides the friend initial — the lock screen marker is a solid dot with no room for it.
-    public var showsMarkerLabels: Bool
-    public var bodyRadius: CGFloat
-    public var bodyCenterY: CGFloat
-    public var bodyColor: Color
-    public var minorTicks: (count: Int, dash: CGFloat, width: CGFloat, radius: CGFloat, color: Color)?
-    public var majorTicks: (count: Int, dash: CGFloat, width: CGFloat, radius: CGFloat, color: Color)?
+/// One participant as the ring draws them.
+struct DialMarker: Identifiable, Hashable, Sendable {
+    var id: String
+    var initial: String
+    /// The true bearing. Never modified — the readout quotes this.
+    var bearing: Double
+    /// Where the dot is actually drawn, after crowding is resolved. Usually the same.
+    var drawnBearing: Double
+    var onTarget: Bool
+    var freshness: Freshness
+    var hasLeft: Bool
 
-    public static let phone = DialStyle(
-        trackRadius: 132, trackWidth: 8, trackColor: OrbitColor.neutral300, arcColor: OrbitColor.blue,
-        markerRadius: 13, markerCenterY: 18, markerStroke: 3, markerFill: OrbitColor.bg,
-        markerLabelSize: 11, showsMarkerLabels: true,
-        bodyRadius: 13.5, bodyCenterY: 18.9, bodyColor: OrbitColor.red,
-        minorTicks: (72, 2, 8, 148, OrbitColor.neutral400),
-        majorTicks: (8, 3, 16, 144, OrbitColor.neutral600)
-    )
+    init(_ reading: ParticipantReading) {
+        id = reading.id
+        initial = reading.initial
+        bearing = reading.bearing
+        drawnBearing = reading.bearing
+        onTarget = reading.onTarget && reading.freshness == .fresh && reading.range == .near
+        freshness = reading.freshness
+        hasLeft = reading.hasLeft
+    }
 
-    /// Lock screen: one tinted layer, so the track is white at two opacities.
-    public static let lockScreen = DialStyle(
-        trackRadius: 126, trackWidth: 18, trackColor: OrbitColor.bg.opacity(0.3), arcColor: OrbitColor.bg,
-        markerRadius: 13, markerCenterY: 24, markerStroke: 0, markerFill: OrbitColor.yellow,
-        markerLabelSize: 0, showsMarkerLabels: false,
-        bodyRadius: 13.5, bodyCenterY: 24, bodyColor: OrbitColor.red,
-        minorTicks: nil, majorTicks: nil
-    )
-}
+    /// In a crowd several people sit within a few degrees of each other and their dots merge.
+    ///
+    /// This spreads the drawn positions just far enough to be separate, and *only* the drawn
+    /// positions: `bearing` still carries the truth, so the numbers under the dial never lie
+    /// about where someone is. A nudged dot is at most a few degrees off, which at arm's length
+    /// is less than the width of the dot itself.
+    static func resolvingCrowding(_ markers: [DialMarker]) -> [DialMarker] {
+        guard markers.count > 1 else { return markers }
 
-/// One friend as the dial needs them — decoupled from `FriendReading` so widgets can draw a
-/// dial from a stored snapshot.
-public struct DialMarker: Identifiable, Hashable, Sendable {
-    public var id: String
-    public var initial: String
-    public var bearing: Double
-    public var onTarget: Bool
-    public var stale: Bool
+        var resolved = markers.sorted { $0.bearing < $1.bearing }
+        let separation = DialUnits.minimumSeparation
 
-    public init(id: String, initial: String, bearing: Double, onTarget: Bool = false, stale: Bool = false) {
-        self.id = id
-        self.initial = initial
-        self.bearing = bearing
-        self.onTarget = onTarget
-        self.stale = stale
+        // A few relaxation passes: push neighbours apart, wrapping around north, and let the
+        // whole cluster settle rather than shunting everything onto the last marker.
+        for _ in 0..<12 {
+            var moved = false
+            for index in resolved.indices {
+                let next = (index + 1) % resolved.count
+                let gap = Geo.signedDelta(from: resolved[index].drawnBearing,
+                                          to: resolved[next].drawnBearing)
+                let signedGap = resolved.count == 2 ? abs(gap) : (gap < 0 ? gap + 360 : gap)
+                guard signedGap < separation else { continue }
+
+                let push = (separation - signedGap) / 2
+                resolved[index].drawnBearing = Geo.normalize(resolved[index].drawnBearing - push)
+                resolved[next].drawnBearing = Geo.normalize(resolved[next].drawnBearing + push)
+                moved = true
+            }
+            if !moved { break }
+        }
+        return resolved
     }
 }
 
-public extension DialMarker {
-    init(_ reading: FriendReading) {
-        self.init(id: reading.id, initial: reading.initial, bearing: reading.bearing,
-                  onTarget: reading.onTarget, stale: reading.stale)
-    }
-}
-
-/// North-up dial: friends sit at their true bearing, the red body shows where the device is
+/// North-up dial: participants sit at their true bearing, the red body shows where the phone is
 /// pointing, and the arc sweeps from north to that heading.
 ///
 /// This is one `Canvas`, not a stack of shape views, so a heading change redraws in a single
-/// pass with no view-tree diffing or layout — which is what lets it hold 120 fps while the
+/// pass with no view-tree diffing and no layout — which is what lets it hold 120 fps while the
 /// heading updates every frame.
-public struct DialView: View {
-    public var heading: Double
-    public var markers: [DialMarker]
-    public var style: DialStyle
+struct DialView: View {
+    var heading: Double
+    var markers: [DialMarker]
 
-    public init(heading: Double, markers: [DialMarker], style: DialStyle = .phone) {
-        self.heading = heading
-        self.markers = markers
-        self.style = style
-    }
-
-    public var body: some View {
+    var body: some View {
         Canvas { context, size in
             let scale = min(size.width, size.height) / DialUnits.view
             context.scaleBy(x: scale, y: scale)
@@ -99,42 +93,39 @@ public struct DialView: View {
     private func draw(in context: inout GraphicsContext) {
         let center = DialUnits.center
 
-        if let ticks = style.minorTicks { drawTicks(ticks, in: &context) }
-        if let ticks = style.majorTicks { drawTicks(ticks, in: &context) }
+        drawTicks((72, 2, 8, 148, OrbitColor.neutral400), in: &context)
+        drawTicks((8, 3, 16, 144, OrbitColor.neutral600), in: &context)
 
         let track = Path(ellipseIn: CGRect(
-            x: center.x - style.trackRadius, y: center.y - style.trackRadius,
-            width: style.trackRadius * 2, height: style.trackRadius * 2
+            x: center.x - DialUnits.trackRadius, y: center.y - DialUnits.trackRadius,
+            width: DialUnits.trackRadius * 2, height: DialUnits.trackRadius * 2
         ))
-        context.stroke(track, with: .color(style.trackColor), lineWidth: style.trackWidth)
+        context.stroke(track, with: .color(OrbitColor.neutral300), lineWidth: DialUnits.trackWidth)
 
-        // The swept arc is the heading, read straight off the dial: north to where you point.
         var arc = Path()
-        arc.addArc(center: center, radius: style.trackRadius,
+        arc.addArc(center: center, radius: DialUnits.trackRadius,
                    startAngle: .degrees(-90),
-                   endAngle: .degrees(-90 + Geo.normalize(heading)),
-                   clockwise: false)
-        context.stroke(arc, with: .color(style.arcColor), lineWidth: style.trackWidth)
+                   endAngle: .degrees(-90 + Geo.normalize(heading)), clockwise: false)
+        context.stroke(arc, with: .color(OrbitColor.blue), lineWidth: DialUnits.trackWidth)
 
         for marker in markers { draw(marker, in: &context) }
 
-        let body = point(atAngle: heading, radius: center.y - style.bodyCenterY)
+        let body = point(atAngle: heading, radius: center.y - DialUnits.bodyCenterY)
         context.fill(
-            Path(ellipseIn: CGRect(x: body.x - style.bodyRadius, y: body.y - style.bodyRadius,
-                                   width: style.bodyRadius * 2, height: style.bodyRadius * 2)),
-            with: .color(style.bodyColor)
+            Path(ellipseIn: CGRect(x: body.x - DialUnits.bodyRadius, y: body.y - DialUnits.bodyRadius,
+                                   width: DialUnits.bodyRadius * 2, height: DialUnits.bodyRadius * 2)),
+            with: .color(OrbitColor.red)
         )
     }
 
     private func drawTicks(_ ticks: (count: Int, dash: CGFloat, width: CGFloat, radius: CGFloat, color: Color),
                            in context: inout GraphicsContext) {
-        let circumference = 2 * .pi * ticks.radius
-        let gap = circumference / CGFloat(ticks.count) - ticks.dash
+        let gap = 2 * .pi * ticks.radius / CGFloat(ticks.count) - ticks.dash
         let path = Path(ellipseIn: CGRect(
             x: DialUnits.center.x - ticks.radius, y: DialUnits.center.y - ticks.radius,
             width: ticks.radius * 2, height: ticks.radius * 2
         ))
-        // A circle path starts at three o'clock; rotating a quarter turn puts a tick on north.
+        // A circle path starts at three o'clock; a quarter turn puts a tick on north.
         var rotated = context
         rotated.translateBy(x: DialUnits.center.x, y: DialUnits.center.y)
         rotated.rotate(by: .degrees(-90))
@@ -146,23 +137,26 @@ public struct DialView: View {
 
     private func draw(_ marker: DialMarker, in context: inout GraphicsContext) {
         let tint = marker.onTarget ? OrbitColor.onTarget : OrbitColor.yellow
-        let opacity = marker.stale ? 0.45 : 1
-        let at = point(atAngle: marker.bearing, radius: DialUnits.center.y - style.markerCenterY)
-        let rect = CGRect(x: at.x - style.markerRadius, y: at.y - style.markerRadius,
-                          width: style.markerRadius * 2, height: style.markerRadius * 2)
-
-        if style.markerStroke > 0 {
-            context.fill(Path(ellipseIn: rect), with: .color(style.markerFill.opacity(opacity)))
-            context.stroke(Path(ellipseIn: rect), with: .color(tint.opacity(opacity)),
-                           lineWidth: style.markerStroke)
-        } else {
-            context.fill(Path(ellipseIn: rect), with: .color(tint.opacity(opacity)))
+        // Three states, three weights. A ghost is drawn hollow and faint but is never removed:
+        // taking the dot away reads as "they left", and sends people the wrong way.
+        let opacity: Double = switch marker.freshness {
+        case .fresh: marker.hasLeft ? 0.3 : 1
+        case .degraded: 0.55
+        case .ghost: 0.3
         }
 
-        guard style.showsMarkerLabels else { return }
+        let at = point(atAngle: marker.drawnBearing, radius: DialUnits.center.y - DialUnits.markerCenterY)
+        let rect = CGRect(x: at.x - DialUnits.markerRadius, y: at.y - DialUnits.markerRadius,
+                          width: DialUnits.markerRadius * 2, height: DialUnits.markerRadius * 2)
+
+        context.fill(Path(ellipseIn: rect), with: .color(OrbitColor.bg.opacity(opacity)))
+        context.stroke(Path(ellipseIn: rect), with: .color(tint.opacity(opacity)),
+                       style: StrokeStyle(lineWidth: 3,
+                                          dash: marker.freshness == .ghost ? [3, 3] : []))
+
         // Labels stay upright: the marker orbits, the letter does not turn with it.
         let text = Text(marker.initial)
-            .font(OrbitFont.heading(style.markerLabelSize))
+            .font(OrbitFont.heading(11))
             .foregroundStyle(tint.opacity(opacity))
         context.draw(context.resolve(text), at: at, anchor: .center)
     }

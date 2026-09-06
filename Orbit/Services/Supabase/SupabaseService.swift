@@ -2,57 +2,72 @@ import Foundation
 import Supabase
 
 /// The one place the project is configured. `SupabaseURL` and `SupabaseAnonKey` come from the
-/// app's Info.plist, which reads them from build settings — so the keys are not in the source.
+/// app's Info.plist, which reads them from build settings, so no key is in source.
 ///
-/// The anon key is *meant* to ship in the client. It grants nothing on its own: every table is
-/// behind row level security, so what a request can see is decided by the signed-in user, not
-/// by the key. The service role key must never appear in this app.
+/// The anon key is meant to ship in a client. It grants nothing on its own: every table is
+/// behind row level security, so what a request may see is decided by the signed-in user. The
+/// service role key must never appear in this app.
 enum SupabaseService {
     static let shared: SupabaseClient? = {
         guard let raw = Bundle.main.object(forInfoDictionaryKey: "SupabaseURL") as? String,
-              let url = URL(string: raw), !raw.isEmpty,
+              !raw.isEmpty, let url = URL(string: raw),
               let key = Bundle.main.object(forInfoDictionaryKey: "SupabaseAnonKey") as? String,
               !key.isEmpty
         else { return nil }
-
         return SupabaseClient(supabaseURL: url, supabaseKey: key)
     }()
 
-    /// False until the keys are filled in, which is what keeps the app running on the local
-    /// stand-in with no configuration at all.
     static var isConfigured: Bool { shared != nil }
 }
 
 // MARK: - Rows
 
-/// `public.profiles`.
-struct ProfileRow: Codable, Sendable {
+struct OrbitRow: Codable, Sendable {
     var id: String
-    var first_name: String
-    var last_name: String
-    var username: String
-    var phone: String?
+    var host_user: String
+    var expires_at: Date
+    var ended_at: Date?
 
-    var contact: Contact {
-        Contact(id: id, firstName: first_name, lastName: last_name,
-                username: username, phone: phone ?? "")
+    var session: OrbitSession {
+        OrbitSession(id: id, hostUserID: host_user, expiresAt: expires_at, endedAt: ended_at)
     }
 }
 
-/// `public.invites`.
-struct InviteRow: Codable, Sendable {
-    var id: String
-    var from_user: String
-    var to_user: String
-    var status: String
+struct CreatedOrbitRow: Codable, Sendable {
+    var orbit_id: String
+    var token: String
+    var orbit_expires_at: Date
+    var token_expires_at: Date
 }
 
-/// `public.locations`.
-struct LocationRow: Codable, Sendable {
+struct TokenRow: Codable, Sendable {
+    var token: String
+    var expires_at: Date
+}
+
+struct ParticipantRow: Codable, Sendable {
+    var id: String
+    var orbit_id: String
     var user_id: String
+    var display_name: String
+    var joined_at: Date
+    var left_at: Date?
+
+    func participant(me: String, host: String) -> Participant {
+        Participant(id: id, displayName: display_name, joinedAt: joined_at, leftAt: left_at,
+                    isSelf: user_id == me, isHost: user_id == host)
+    }
+}
+
+struct PositionRow: Codable, Sendable {
+    var participant_id: String
     var latitude: Double
     var longitude: Double
-    var course: Double?
-    var speed: Double?
+    var accuracy: Double?
     var updated_at: Date
+
+    var fix: ParticipantFix {
+        ParticipantFix(participantID: participant_id, latitude: latitude, longitude: longitude,
+                       accuracy: accuracy, updatedAt: updated_at)
+    }
 }

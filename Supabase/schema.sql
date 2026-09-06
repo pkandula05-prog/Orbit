@@ -1,161 +1,324 @@
 -- Orbit — Supabase schema.
 --
--- Paste this whole file into the SQL editor of a new Supabase project and run it once.
+-- Paste this whole file into the SQL editor of a Supabase project and run it once.
 --
--- The rule the whole app rests on is enforced here, not in Swift: a location row is readable
--- only by someone with an accepted, two-way invite. No client bug can leak a position,
--- because the database will not return it.
+-- Orbit has no friend graph. Nobody is on your dial by default. You create an *orbit*, share a
+-- link, and it ends — by expiry, by the host closing it, or by everyone leaving. Everything
+-- below exists to make that lifecycle something the database enforces rather than something the
+-- app is trusted to respect.
+--
+-- Two rules are load-bearing, and both are policies, not app code:
+--   1. A position is readable only by a fellow participant of the same orbit, only while that
+--      orbit is active, and only if the reader has not left.
+--   2. Expiry is server-side. A client with a stale clock, or a patched client, cannot extend
+--      its own access by a second.
 
-create extension if not exists citext;
+-- ---------------------------------------------------------------- orbits
 
--- ---------------------------------------------------------------- profiles
-
-create table public.profiles (
-    id          uuid primary key references auth.users on delete cascade,
-    first_name  text not null,
-    last_name   text not null,
-    username    citext not null unique
-                check (length(username) between 3 and 20 and username ~ '^[a-z0-9_]+$'),
-    -- E.164, e.g. +14155550134. Never exposed by a policy; only the matching function reads it.
-    phone       text,
-    created_at  timestamptz not null default now()
+create table public.orbits (
+    id           uuid primary key default gen_random_uuid(),
+    host_user    uuid not null references auth.users on delete cascade,
+    created_at   timestamptz not null default now(),
+    -- Hard ceiling of 24 hours from creation or from any extension. There is no indefinite
+    -- orbit: a forgotten one always dies.
+    expires_at   timestamptz not null,
+    ended_at     timestamptz,
+    check (expires_at > created_at)
 );
 
-alter table public.profiles enable row level security;
+create index on public.orbits (host_user);
 
--- You can always read and write your own row.
-create policy "own profile" on public.profiles
-    for all using (auth.uid() = id) with check (auth.uid() = id);
-
--- You can read the profile of anyone you have an invite with, in either direction and at any
--- stage — otherwise a pending request would have no name to show.
-create policy "profiles of people you have an invite with" on public.profiles
-    for select using (
-        exists (
-            select 1 from public.invites i
-            where (i.from_user = auth.uid() and i.to_user = profiles.id)
-               or (i.to_user = auth.uid() and i.from_user = profiles.id)
-        )
-    );
-
--- ---------------------------------------------------------------- invites
-
-create type public.invite_status as enum ('pending', 'accepted', 'declined');
-
-create table public.invites (
-    id          uuid primary key default gen_random_uuid(),
-    from_user   uuid not null references auth.users on delete cascade,
-    to_user     uuid not null references auth.users on delete cascade,
-    status      public.invite_status not null default 'pending',
+-- The join link is a capability, so it is a row of its own: it can be revoked and replaced
+-- without touching the orbit, and it expires long before the orbit does.
+create table public.join_tokens (
+    token       text primary key,
+    orbit_id    uuid not null references public.orbits on delete cascade,
     created_at  timestamptz not null default now(),
-    responded_at timestamptz,
-    check (from_user <> to_user),
-    unique (from_user, to_user)
+    expires_at  timestamptz not null,
+    revoked     boolean not null default false
 );
 
-create index on public.invites (to_user, status);
-create index on public.invites (from_user, status);
+create index on public.join_tokens (orbit_id) where not revoked;
 
-alter table public.invites enable row level security;
+-- ---------------------------------------------------------------- participants
 
-create policy "invites you are part of" on public.invites
-    for select using (auth.uid() in (from_user, to_user));
-
-create policy "you can invite" on public.invites
-    for insert with check (auth.uid() = from_user);
-
--- Only the recipient answers, and only a pending invite.
-create policy "you answer your own invites" on public.invites
-    for update using (auth.uid() = to_user and status = 'pending')
-    with check (auth.uid() = to_user);
-
--- Either side can withdraw or stop sharing.
-create policy "either side can end it" on public.invites
-    for delete using (auth.uid() in (from_user, to_user));
-
--- ---------------------------------------------------------------- locations
-
-create table public.locations (
-    user_id     uuid primary key references auth.users on delete cascade,
-    latitude    double precision not null,
-    longitude   double precision not null,
-    -- Degrees clockwise from north, and metres per second — how they are moving.
-    course      double precision,
-    speed       double precision,
-    updated_at  timestamptz not null default now()
+create table public.participants (
+    id           uuid primary key default gen_random_uuid(),
+    orbit_id     uuid not null references public.orbits on delete cascade,
+    user_id      uuid not null references auth.users on delete cascade,
+    -- Free text, not unique. The link is the identity mechanism; this is just what to call
+    -- someone on the dial.
+    display_name text not null check (length(display_name) between 1 and 24),
+    joined_at    timestamptz not null default now(),
+    left_at      timestamptz,
+    unique (orbit_id, user_id)
 );
 
-alter table public.locations enable row level security;
+create index on public.participants (orbit_id) where left_at is null;
 
-create policy "write only your own position" on public.locations
-    for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+-- ---------------------------------------------------------------- positions
 
--- The one that matters. A position is visible only where sharing is mutual and accepted.
-create policy "read positions of people sharing with you" on public.locations
+-- Latest only. There is no history table, and that is a product commitment: when an orbit ends
+-- there is nothing to replay, subpoena, or leak.
+create table public.positions (
+    participant_id uuid primary key references public.participants on delete cascade,
+    latitude       double precision not null,
+    longitude      double precision not null,
+    accuracy       double precision,
+    updated_at     timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------- helpers
+
+-- An orbit is live if it has not been ended and has not run out of time. Every policy below
+-- goes through this, so "active" means one thing everywhere.
+create or replace function public.orbit_is_active(orbit uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+    select exists (
+        select 1 from public.orbits o
+        where o.id = orbit and o.ended_at is null and o.expires_at > now()
+    );
+$$;
+
+-- Your own live membership of an orbit, if any.
+create or replace function public.my_participant(orbit uuid)
+returns uuid language sql stable security definer set search_path = public as $$
+    select p.id from public.participants p
+    where p.orbit_id = orbit and p.user_id = auth.uid() and p.left_at is null
+    limit 1;
+$$;
+
+-- ---------------------------------------------------------------- policies
+
+alter table public.orbits enable row level security;
+alter table public.participants enable row level security;
+alter table public.positions enable row level security;
+alter table public.join_tokens enable row level security;
+
+-- You can see an orbit you are in. Ended and expired ones stay visible so the app can show an
+-- explicit "this orbit is over" state rather than an ambiguous empty dial.
+create policy "orbits you are in" on public.orbits
+    for select using (
+        exists (select 1 from public.participants p
+                where p.orbit_id = orbits.id and p.user_id = auth.uid())
+    );
+
+-- Everyone in an orbit sees everyone else, including people who have left — a departure has to
+-- be announceable, and a name that vanishes is worse than one marked gone.
+create policy "participants of your orbits" on public.participants
+    for select using (
+        exists (select 1 from public.participants me
+                where me.orbit_id = participants.orbit_id and me.user_id = auth.uid())
+    );
+
+-- Leaving is the only row change a participant makes directly.
+create policy "you can leave" on public.participants
+    for update using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Rule 1. Note all three conditions: same orbit, orbit still active, and the reader still in it.
+create policy "positions of live co-participants" on public.positions
     for select using (
         exists (
-            select 1 from public.invites i
-            where i.status = 'accepted'
-              and ((i.from_user = auth.uid() and i.to_user = locations.user_id)
-                or (i.to_user = auth.uid() and i.from_user = locations.user_id))
+            select 1
+            from public.participants them
+            join public.participants me on me.orbit_id = them.orbit_id
+            where them.id = positions.participant_id
+              and me.user_id = auth.uid()
+              and me.left_at is null
+              and public.orbit_is_active(them.orbit_id)
         )
     );
 
--- Realtime respects the policies above, so a client subscribed to every change still only
--- receives the rows it is allowed to read.
-alter publication supabase_realtime add table public.locations;
-alter publication supabase_realtime add table public.invites;
+-- You write your own position, and only while your orbit is live. Publishing stops being
+-- possible the moment the orbit ends, whatever the client believes.
+create policy "publish your own position" on public.positions
+    for all using (
+        exists (select 1 from public.participants p
+                where p.id = positions.participant_id
+                  and p.user_id = auth.uid()
+                  and p.left_at is null
+                  and public.orbit_is_active(p.orbit_id))
+    ) with check (
+        exists (select 1 from public.participants p
+                where p.id = positions.participant_id
+                  and p.user_id = auth.uid()
+                  and p.left_at is null
+                  and public.orbit_is_active(p.orbit_id))
+    );
 
--- ---------------------------------------------------------------- functions
+-- Only the host ever reads a token back, to show or share the link.
+create policy "host reads its own tokens" on public.join_tokens
+    for select using (
+        exists (select 1 from public.orbits o
+                where o.id = join_tokens.orbit_id and o.host_user = auth.uid())
+    );
 
--- Username availability, callable before sign-up. Security definer so it can see the unique
--- index without any policy exposing the profiles table to strangers.
-create or replace function public.username_available(name citext)
-returns boolean language sql security definer set search_path = public as $$
-    select not exists (select 1 from public.profiles where username = name);
+alter publication supabase_realtime add table public.positions;
+alter publication supabase_realtime add table public.participants;
+alter publication supabase_realtime add table public.orbits;
+
+-- ---------------------------------------------------------------- operations
+
+create or replace function public.create_orbit(hours int, display_name text)
+returns table (orbit_id uuid, token text, orbit_expires_at timestamptz, token_expires_at timestamptz)
+language plpgsql security definer set search_path = public as $$
+declare
+    new_orbit uuid;
+    new_token text;
+    token_expiry timestamptz;
+begin
+    if hours not in (1, 6, 12, 24) then
+        raise exception 'duration must be 1, 6, 12 or 24 hours';
+    end if;
+
+    insert into public.orbits (host_user, expires_at)
+    values (auth.uid(), now() + make_interval(hours => hours))
+    returning id into new_orbit;
+
+    insert into public.participants (orbit_id, user_id, display_name)
+    values (new_orbit, auth.uid(), display_name);
+
+    -- The link outlives neither the orbit nor an hour, whichever comes first.
+    new_token := encode(gen_random_bytes(9), 'base64');
+    new_token := replace(replace(replace(new_token, '+', '-'), '/', '_'), '=', '');
+    token_expiry := least(now() + interval '1 hour', (select expires_at from public.orbits where id = new_orbit));
+
+    insert into public.join_tokens (token, orbit_id, expires_at)
+    values (new_token, new_orbit, token_expiry);
+
+    return query select new_orbit, new_token, (select expires_at from public.orbits where id = new_orbit), token_expiry;
+end;
 $$;
 
-grant execute on function public.username_available(citext) to anon, authenticated;
+-- Joining is the whole membership check in one statement: the token has to be live, the orbit
+-- has to be live, and there has to be room. A client cannot talk its way past any of the three.
+create or replace function public.join_orbit(join_token text, display_name text)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare
+    target uuid;
+    occupied int;
+    existing uuid;
+begin
+    select t.orbit_id into target
+    from public.join_tokens t
+    where t.token = join_token and not t.revoked and t.expires_at > now();
 
--- Contact matching. The client sends normalised E.164 numbers; only the ones with accounts
--- come back, and nothing is stored. Numbers that do not match are discarded.
---
--- Note the trade-off honestly: this reveals to the server which numbers are in your address
--- book for the duration of the call. Hashing them client-side does not fix it — the phone
--- number space is small enough to brute-force — so the real answer is private set
--- intersection, which is out of scope here. Do not log the input.
-create or replace function public.match_contacts(phones text[])
-returns table (id uuid, first_name text, last_name text, username citext, phone text)
-language sql security definer set search_path = public as $$
-    select p.id, p.first_name, p.last_name, p.username, p.phone
-    from public.profiles p
-    where p.phone = any(phones) and p.id <> auth.uid();
+    if target is null then
+        raise exception 'link_invalid';
+    end if;
+
+    if not public.orbit_is_active(target) then
+        raise exception 'orbit_over';
+    end if;
+
+    -- Rejoining on a still-valid link is allowed, and does not consume a second seat.
+    select p.id into existing from public.participants p
+    where p.orbit_id = target and p.user_id = auth.uid();
+
+    if existing is not null then
+        update public.participants
+        set left_at = null, display_name = coalesce(nullif(join_orbit.display_name, ''), participants.display_name)
+        where id = existing;
+        return target;
+    end if;
+
+    select count(*) into occupied from public.participants p
+    where p.orbit_id = target and p.left_at is null;
+
+    if occupied >= 6 then
+        raise exception 'orbit_full';
+    end if;
+
+    insert into public.participants (orbit_id, user_id, display_name)
+    values (target, auth.uid(), display_name);
+
+    return target;
+end;
 $$;
 
-grant execute on function public.match_contacts(text[]) to authenticated;
+-- Extension is capped against the clock, not against the previous expiry, so repeated calls
+-- can never push an orbit past a day of remaining life.
+create or replace function public.extend_orbit(orbit uuid, hours int)
+returns timestamptz language plpgsql security definer set search_path = public as $$
+declare
+    updated timestamptz;
+begin
+    update public.orbits o
+    set expires_at = least(o.expires_at + make_interval(hours => hours), now() + interval '24 hours')
+    where o.id = orbit and o.host_user = auth.uid() and o.ended_at is null and o.expires_at > now()
+    returning o.expires_at into updated;
 
--- Search by name or username, so people can be found without an address book.
-create or replace function public.search_people(term text)
-returns table (id uuid, first_name text, last_name text, username citext)
-language sql security definer set search_path = public as $$
-    select p.id, p.first_name, p.last_name, p.username
-    from public.profiles p
-    where p.id <> auth.uid()
-      and (p.username ilike term || '%'
-        or p.first_name ilike term || '%'
-        or p.last_name ilike term || '%')
-    limit 20;
+    if updated is null then raise exception 'not_host_or_over'; end if;
+    return updated;
+end;
 $$;
 
-grant execute on function public.search_people(text) to authenticated;
+create or replace function public.regenerate_token(orbit uuid)
+returns table (token text, expires_at timestamptz)
+language plpgsql security definer set search_path = public as $$
+declare
+    fresh text;
+    expiry timestamptz;
+begin
+    if not exists (select 1 from public.orbits o
+                   where o.id = orbit and o.host_user = auth.uid() and public.orbit_is_active(orbit)) then
+        raise exception 'not_host_or_over';
+    end if;
 
--- Accepting is the only path to sharing, and it is one statement so it cannot half-happen.
-create or replace function public.respond_to_invite(invite uuid, accept boolean)
-returns void language sql security invoker set search_path = public as $$
-    update public.invites
-    set status = case when accept then 'accepted'::invite_status else 'declined'::invite_status end,
-        responded_at = now()
-    where id = invite and to_user = auth.uid() and status = 'pending';
+    update public.join_tokens set revoked = true where orbit_id = orbit and not revoked;
+
+    fresh := replace(replace(replace(encode(gen_random_bytes(9), 'base64'), '+', '-'), '/', '_'), '=', '');
+    expiry := least(now() + interval '1 hour', (select o.expires_at from public.orbits o where o.id = orbit));
+
+    insert into public.join_tokens (token, orbit_id, expires_at) values (fresh, orbit, expiry);
+    return query select fresh, expiry;
+end;
 $$;
 
-grant execute on function public.respond_to_invite(uuid, boolean) to authenticated;
+-- The host ending it ends it for everyone; positions go with it.
+create or replace function public.end_orbit(orbit uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+    update public.orbits set ended_at = now()
+    where id = orbit and host_user = auth.uid() and ended_at is null;
+
+    update public.join_tokens set revoked = true where orbit_id = orbit;
+
+    delete from public.positions
+    where participant_id in (select id from public.participants where orbit_id = orbit);
+end;
+$$;
+
+-- Leaving drops your position immediately, and ends the orbit if you were the last one in it.
+create or replace function public.leave_orbit(orbit uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare
+    mine uuid;
+    remaining int;
+begin
+    select public.my_participant(orbit) into mine;
+    if mine is null then return; end if;
+
+    update public.participants set left_at = now() where id = mine;
+    delete from public.positions where participant_id = mine;
+
+    select count(*) into remaining from public.participants
+    where orbit_id = orbit and left_at is null;
+
+    -- The host leaving ends it, and so does the last person out.
+    if remaining = 0 or exists (select 1 from public.orbits o
+                                where o.id = orbit and o.host_user = auth.uid()) then
+        update public.orbits set ended_at = now() where id = orbit and ended_at is null;
+        update public.join_tokens set revoked = true where orbit_id = orbit;
+        delete from public.positions
+        where participant_id in (select id from public.participants where orbit_id = orbit);
+    end if;
+end;
+$$;
+
+grant execute on function public.create_orbit(int, text) to authenticated;
+grant execute on function public.join_orbit(text, text) to authenticated;
+grant execute on function public.extend_orbit(uuid, int) to authenticated;
+grant execute on function public.regenerate_token(uuid) to authenticated;
+grant execute on function public.end_orbit(uuid) to authenticated;
+grant execute on function public.leave_orbit(uuid) to authenticated;
