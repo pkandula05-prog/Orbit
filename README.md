@@ -172,3 +172,53 @@ Tools/           make_icon.py — renders the app icon from the artboard's geome
 - Stale fixes (older than five minutes) dim their ring marker but are not called out in text.
 - The invite list is the demo roster, not the device's real contacts; reading those means
   adding `Contacts` and a usage string.
+
+## Connecting it to Supabase
+
+The app runs on `LocalAccountStore` and the mock feed with no configuration at all. Fill in two
+build settings and it switches to a real backend — the code picks Supabase over the stand-in
+automatically, so there is no flag to flip.
+
+**1 · Create the project.** At [supabase.com](https://supabase.com) → *New project*. Pick a
+region near you and save the database password somewhere.
+
+**2 · Create the schema.** In the project, *SQL Editor* → *New query*. Paste the whole of
+`Supabase/schema.sql`, run it. That builds the tables, the row level security policies and the
+functions. Read the comments in it — the rule that a position is readable only where sharing is
+mutual and accepted is a policy, so no bug in this app can leak a location.
+
+**3 · Turn on SMS sign-in.** *Authentication → Sign In / Providers → Phone*, enable it, and give
+it an SMS provider. Twilio is the usual choice: sign up, get the Account SID, Auth Token and a
+sending number from its console, paste them in. A Twilio trial can only text numbers you have
+verified with Twilio — fine for you and one friend, which is what testing sharing needs.
+
+**4 · Copy the keys.** *Project Settings → API*. Take the **Project URL** and the **anon public**
+key. Never the `service_role` key — that one bypasses every policy and must not ship in an app.
+
+**5 · Put them in the build settings.** In Xcode select the **Orbit** target → *Build Settings*
+→ search `SUPABASE`. Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` on both Debug and Release. They
+reach the app through `Info.plist`, so they stay out of source. (If you would rather not commit
+them at all, move them to an untracked `.xcconfig`.)
+
+**6 · Add the SDK.** In Xcode: *File → Add Package Dependencies…*, enter
+`https://github.com/supabase/supabase-swift`, choose *Up to Next Major* from 2.0.0, and add the
+**Supabase** product to the **Orbit** target only — the Live Activity extension does not talk to
+the network.
+
+**7 · Run it.** Sign up with a real number. Check the *Table Editor* in Supabase: your row
+should be in `profiles`. Send an invite to a second account, accept it from that device, and
+`locations` starts filling in.
+
+### What still needs building
+
+- **`invite-sms`** — inviting a number with no account calls a Supabase Edge Function of that
+  name, which does not exist yet. Until it does, that button will fail. It needs to send an SMS
+  with an install link and record the pending invite.
+- **Push notifications** for invites. The app hears about them over Realtime while it is open;
+  a closed app needs APNs, which your paid developer account covers.
+- **Phone number normalisation** is deliberately naive (assumes +1 when no country code).
+  Swap in libPhoneNumber before this meets anyone outside one country.
+- **Contact matching sends numbers to the server** for the length of the call. Hashing them
+  client-side would not fix it — the phone number space is small enough to brute-force — so the
+  honest fix is private set intersection, which is out of scope here. The function does not
+  store what it is given.

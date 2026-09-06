@@ -36,6 +36,8 @@ final class DeviceCompass: NSObject {
     /// Fired when the whole degree changes — a few times a second, not per frame. The Live
     /// Activity rides on this, so the Lock Screen turns when the dial does.
     var onHeadingChange: ((Int) -> Void)?
+    /// Every new fix, with the course and speed CoreLocation already worked out for us.
+    var onLocationChange: ((CLLocationCoordinate2D, Double?, Double?) -> Void)?
 
     private let manager = CLLocationManager()
     private var link: CADisplayLink?
@@ -151,6 +153,9 @@ extension DeviceCompass: CLLocationManagerDelegate {
         MainActor.assumeIsolated {
             coordinate = last.coordinate
             altitude = last.verticalAccuracy >= 0 ? last.altitude : nil
+            onLocationChange?(last.coordinate,
+                              last.course >= 0 ? last.course : nil,
+                              last.speed >= 0 ? last.speed : nil)
         }
     }
 

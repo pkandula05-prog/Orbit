@@ -47,6 +47,9 @@ struct Contact: Identifiable, Hashable, Codable, Sendable {
     var isOnOrbit: Bool = true
     var relation: Relation = .none
     var source: Source = .contacts
+    /// The invite row's id, when there is one — what `respond` answers. Nil for someone who
+    /// has only been matched or searched for.
+    var inviteID: String?
 
     var name: String { "\(firstName) \(lastName)".trimmingCharacters(in: .whitespaces) }
     var initial: String { String(firstName.prefix(1)).uppercased() }
@@ -83,8 +86,10 @@ protocol AccountBackend: Sendable {
     func sendCode(to phone: String) async throws -> String
     /// `POST /auth/verify` → session token, and creates the account with the profile.
     func verify(code: String, sentCode: String, profile: Profile) async throws
-    /// `POST /contacts/match` with hashed phone numbers → the ones with accounts.
+    /// `POST /contacts/match` with phone numbers → the ones with accounts.
     func match(phones: [String]) async throws -> [Contact]
+    /// Find people by name or username, for anyone who will not grant contacts access.
+    func search(_ term: String) async throws -> [Contact]
     /// `GET /invites` → both directions.
     func invites() async throws -> [Contact]
     /// `POST /invites` → creates a pending invite for an existing account.
@@ -156,6 +161,10 @@ struct LocalAccountStore: AccountBackend {
         guard !phones.isEmpty else { return Self.seeded }
         let digits = Set(phones.map { $0.filter(\.isNumber).suffix(7) })
         return Self.seeded.filter { digits.contains($0.phone.filter(\.isNumber).suffix(7)) }
+    }
+
+    func search(_ term: String) async throws -> [Contact] {
+        Self.seeded.filter { $0.matches(term) }
     }
 
     func invites() async throws -> [Contact] {

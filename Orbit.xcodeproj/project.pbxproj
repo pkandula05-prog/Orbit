@@ -303,6 +303,8 @@
 				);
 				MARKETING_VERSION = 1.0;
 				ORBIT_FEED_TOKEN = "";
+				SUPABASE_ANON_KEY = "";
+				SUPABASE_URL = "";
 				ORBIT_FEED_URL = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.orbit.compass;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -335,6 +337,8 @@
 				);
 				MARKETING_VERSION = 1.0;
 				ORBIT_FEED_TOKEN = "";
+				SUPABASE_ANON_KEY = "";
+				SUPABASE_URL = "";
 				ORBIT_FEED_URL = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.orbit.compass;
 				PRODUCT_NAME = "$(TARGET_NAME)";

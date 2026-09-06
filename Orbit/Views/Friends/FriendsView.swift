@@ -50,6 +50,7 @@ struct FriendsView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .padding(.top, isSheet ? 8 : 22)
+                    .onChange(of: query) { _, term in model.search(term) }
             }
             .padding(.top, isSheet ? 0 : 56)
 

@@ -53,10 +53,12 @@ final class AppModel {
     private(set) var friends: [FriendLocation] = []
 
     private let backend: AccountBackend
+    private let publisher = LocationPublisher()
     private var sentCode = ""
     private var feedTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var usernameTask: Task<Void, Never>?
+    private var searchTask: Task<Void, Never>?
     private let defaults = UserDefaults.standard
     private enum Key {
         static let onboarded = "orbit.onboarded"
@@ -65,8 +67,10 @@ final class AppModel {
         static let contacts = "orbit.contacts"
     }
 
-    init(backend: AccountBackend = LocalAccountStore()) {
-        self.backend = backend
+    /// Supabase when the project is configured, the local stand-in when it is not — so the
+    /// app still runs, and still demos, with no keys filled in.
+    init(backend: AccountBackend? = nil) {
+        self.backend = backend ?? SupabaseService.shared.map(SupabaseAccountBackend.init) ?? LocalAccountStore()
         restore()
     }
 
@@ -102,6 +106,12 @@ final class AppModel {
         compass.start()
         // Every whole degree, not every frame: enough to look continuous, cheap enough to push.
         compass.onHeadingChange = { [weak self] _ in self?.pushLive() }
+        compass.onLocationChange = { [weak self] coordinate, course, speed in
+            guard let self else { return }
+            // Your own position goes up only if somebody has been accepted to see it.
+            self.publisher.publish(coordinate, course: course, speed: speed,
+                                   hasFriends: !self.sharingIDs.isEmpty)
+        }
         if contacts.isEmpty { loadDirectory() }
         startFeed()
         listenForEvents()
@@ -113,6 +123,18 @@ final class AppModel {
         Task {
             let invites = (try? await backend.invites()) ?? []
             merge(invites)
+        }
+    }
+
+    /// Search the directory for anyone not already in the roster — the way to find someone
+    /// without handing over an address book.
+    func search(_ term: String) {
+        searchTask?.cancel()
+        guard term.count >= 2 else { return }
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            merge((try? await backend.search(term)) ?? [])
         }
     }
 
@@ -143,9 +165,14 @@ final class AppModel {
 
     private func startFeed() {
         feedTask?.cancel()
+        // Names are held here rather than joined on every position: the roster is already
+        // known, and the feed only carries ids and coordinates.
+        let names = Dictionary(uniqueKeysWithValues: contacts.map {
+            ($0.id, (name: $0.shortName, initial: $0.initial))
+        })
         let source = Self.makeSource(origin: { [fix = compass.lastFix] in
             fix.coordinate ?? MockFriendSource.demoOrigin
-        }, visible: sharingIDs)
+        }, visible: sharingIDs, names: names)
 
         feedTask = Task { [weak self] in
             for await batch in source.stream() {
@@ -158,7 +185,11 @@ final class AppModel {
 
     /// A real feed reports real coordinates and ignores `origin`; only the mock uses it.
     private static func makeSource(origin: @escaping @Sendable () -> CLLocationCoordinate2D,
-                                   visible: [String]) -> FriendSource {
+                                   visible: [String],
+                                   names: [String: (name: String, initial: String)]) -> FriendSource {
+        if let client = SupabaseService.shared {
+            return SupabaseFriendSource(client: client) { names[$0] }
+        }
         if let raw = Bundle.main.object(forInfoDictionaryKey: "OrbitFeedURL") as? String,
            !raw.isEmpty, let url = URL(string: raw) {
             let token = Bundle.main.object(forInfoDictionaryKey: "OrbitFeedToken") as? String
@@ -291,7 +322,7 @@ final class AppModel {
 
     /// Accepting is the explicit, two-way act that starts sharing; declining shares nothing.
     func respond(to contact: Contact, accept: Bool) {
-        Task { try? await backend.respond(to: contact.id, accept: accept) }
+        Task { try? await backend.respond(to: contact.inviteID ?? contact.id, accept: accept) }
         if accept {
             set(contact.id, to: .sharing)
             if trackedIDs.count < maxTracked { trackedIDs.append(contact.id) }

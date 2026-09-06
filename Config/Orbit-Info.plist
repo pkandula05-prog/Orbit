@@ -18,6 +18,10 @@
 		<string>Archivo-SemiBold.ttf</string>
 		<string>Archivo-Bold.ttf</string>
 	</array>
+	<key>SupabaseURL</key>
+	<string>$(SUPABASE_URL)</string>
+	<key>SupabaseAnonKey</key>
+	<string>$(SUPABASE_ANON_KEY)</string>
 	<key>OrbitFeedURL</key>
 	<string>$(ORBIT_FEED_URL)</string>
 	<key>OrbitFeedToken</key>
