@@ -133,17 +133,17 @@ private struct MediumWidget: View {
                 Text(person.name)
                     .font(OrbitFont.semibold(13))
                     .foregroundStyle(OrbitColor.ink)
-                HStack(spacing: 5) {
-                    Text(Geo.formatDistance(person.distanceM))
-                        .font(OrbitFont.mono(10, weight: .regular))
-                        .foregroundStyle(OrbitColor.neutral700)
-                    MovementMark(person: person)
-                }
+                Text(Geo.formatDistance(person.distanceM))
+                    .font(OrbitFont.mono(10, weight: .regular))
+                    .foregroundStyle(OrbitColor.neutral700)
             }
             Spacer(minLength: 6)
+            // Always red here. On-target green means "you are facing them right now", and a
+            // widget has no live compass to make that claim with — only the app and the Live
+            // Activity do.
             Text(Geo.formatDelta(delta))
                 .font(OrbitFont.mono(20))
-                .foregroundStyle(Geo.isOnTarget(delta) ? OrbitColor.onTarget : OrbitColor.red)
+                .foregroundStyle(OrbitColor.red)
         }
         .padding(.top, isFirst ? 0 : 10)
         .overlay(alignment: .top) {
@@ -182,25 +182,6 @@ private struct LockScreenDial: View {
     }
 }
 
-/// Which way they are going, and whether that is toward you. The arrow points along their
-/// course; the word says what the distance is doing.
-private struct MovementMark: View {
-    var person: OrbitSnapshot.Person
-
-    var body: some View {
-        if let course = person.course, person.speedMps > 0.2 {
-            HStack(spacing: 3) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 8, weight: .bold))
-                    .rotationEffect(.degrees(course))
-                Text(person.closingSpeed > 0.2 ? "Closing" : "Away")
-                    .caps(8, person.closingSpeed > 0.2 ? OrbitColor.onTarget : OrbitColor.neutral700)
-            }
-            .foregroundStyle(person.closingSpeed > 0.2 ? OrbitColor.onTarget : OrbitColor.neutral700)
-        }
-    }
-}
-
 struct OrbitCompassWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: OrbitShared.widgetKind, provider: OrbitProvider()) { entry in
@@ -216,5 +197,6 @@ struct OrbitCompassWidget: Widget {
 struct OrbitWidgetBundle: WidgetBundle {
     var body: some Widget {
         OrbitCompassWidget()
+        OrbitLiveActivity()
     }
 }

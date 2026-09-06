@@ -293,7 +293,7 @@
 				INFOPLIST_FILE = "Config/Orbit-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Orbit;
 				INFOPLIST_KEY_NSContactsUsageDescription = "Orbit matches your contacts against people already here so you can find them. Numbers are matched, never shared.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Orbit uses your location and compass to show which way your friends are and how far away they are.";
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Keeping location on in the background lets the Lock Screen dial keep turning while Orbit is in your pocket.";\n				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Orbit uses your location and compass to show which way your friends are and how far away they are.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Orbit reads the compass to know which way you are facing. It never leaves the device.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -325,7 +325,7 @@
 				INFOPLIST_FILE = "Config/Orbit-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Orbit;
 				INFOPLIST_KEY_NSContactsUsageDescription = "Orbit matches your contacts against people already here so you can find them. Numbers are matched, never shared.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Orbit uses your location and compass to show which way your friends are and how far away they are.";
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Keeping location on in the background lets the Lock Screen dial keep turning while Orbit is in your pocket.";\n				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Orbit uses your location and compass to show which way your friends are and how far away they are.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Orbit reads the compass to know which way you are facing. It never leaves the device.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

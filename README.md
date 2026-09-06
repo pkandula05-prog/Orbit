@@ -138,13 +138,32 @@ lock-screen circular (6c). A widget cannot read the compass — an extension is 
 timeline, not run continuously — so the app writes the dial into the App Group and the widgets
 render that.
 
-They are not stuck on one still frame, though. Each fix is compared against the previous one to
-get that friend's **course and speed**, which travel with the snapshot; the timeline then
-carries a minute-by-minute projection of where that motion takes them, so between reloads the
-marker keeps moving and the delta keeps counting. Each row shows which way they are heading and
-whether they are closing on you. The app pushes a fresh timeline whenever the real dial moves
-enough to be worth one — two degrees of bearing, or 25 metres — rather than on a fixed clock.
-The device heading is still the last one the app saw: only the app can read the magnetometer.
+They are not stuck on one still frame: each fix is compared against the previous one to get
+that friend's **course and speed**, which travel with the snapshot, and the timeline carries a
+minute-by-minute projection of where that motion takes them. The app pushes a fresh timeline
+whenever the real dial moves enough to be worth one — two degrees of bearing, or 25 metres.
+
+**A home screen widget cannot follow a compass, and no amount of code changes that.** WidgetKit
+wakes an extension to hand back a timeline, on a budget of a few dozen reloads a day, and never
+runs it continuously; there is no API for an extension to read heading. So the widget's delta is
+never "you are facing them right now" — which is why the medium widget draws it in red rather
+than flipping to on-target green. Green there would be a claim the widget cannot make.
+
+## The Live Activity — the real-time surface
+
+For a dial that actually keeps up while you walk, Orbit runs a **Live Activity**
+(`Shared/OrbitActivity.swift`, `OrbitWidgets/OrbitLiveActivity.swift`). Unlike a widget, its
+state is pushed *by the app*, so `LiveDial` updates it on every whole degree of heading and
+every new fix — the Lock Screen and Dynamic Island turn with the dial, not on a timer.
+
+It starts when you open the orbit with someone tracked, and ends when you stop tracking
+everyone. Two notes on it:
+
+- Starting one asks to escalate location access from when-in-use to **always**. Without that
+  the activity freezes the moment the phone goes in a pocket, which is exactly when a Lock
+  Screen dial earns its place. Declining is fine — it simply stops updating in the background.
+- `NSSupportsLiveActivitiesFrequentUpdates` is set, which asks the system to allow a high update
+  rate. iOS still budgets this, and heavy use will be throttled.
 
 WidgetKit archives a widget's view tree and replays it out of process, where `Canvas` cannot be
 relied on to draw, so `Shared/StaticDialView.swift` builds the same dial from shapes. Both read

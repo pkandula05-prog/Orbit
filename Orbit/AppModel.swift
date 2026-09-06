@@ -47,6 +47,9 @@ final class AppModel {
     var showingFriends = false
 
     let compass = DeviceCompass()
+    /// The Lock Screen / Dynamic Island dial. This is the only surface outside the app that
+    /// can follow you in real time.
+    let live = LiveDial()
     private(set) var friends: [FriendLocation] = []
 
     private let backend: AccountBackend
@@ -103,6 +106,8 @@ final class AppModel {
 
     func start() {
         compass.start()
+        // Every whole degree, not every frame: enough to look continuous, cheap enough to push.
+        compass.onHeadingChange = { [weak self] _ in self?.pushLive() }
         if contacts.isEmpty { loadDirectory() }
         startFeed()
         listenForEvents()
@@ -183,6 +188,7 @@ final class AppModel {
         }
         friends = batch
         publishSnapshot()
+        pushLive()
     }
 
     private func listenForEvents() {
@@ -326,6 +332,7 @@ final class AppModel {
         persist()
         startFeed()
         phase = .orbit
+        pushLive()
     }
 
     // MARK: - Tracking
@@ -338,6 +345,7 @@ final class AppModel {
         }
         persist()
         publishSnapshot(force: true)
+        if trackedIDs.isEmpty { live.stop() } else { pushLive() }
     }
 
     func isAtCapacity(_ id: String) -> Bool {
@@ -390,16 +398,33 @@ final class AppModel {
     /// The widgets redraw from this. Written whenever the dial has materially changed — a new
     /// bearing, a new distance, someone added or dropped — rather than on a fixed clock, so a
     /// widget is never more than one fix behind while the app is open.
-    private func publishSnapshot(force: Bool = false) {
+    /// The dial as the widgets and the Live Activity want it.
+    private func currentSnapshot() -> OrbitSnapshot? {
         let people = model.tracked.prefix(2).map { friend in
             OrbitSnapshot.Person(id: friend.id, name: friend.name, initial: friend.initial,
                                  bearing: friend.bearing, distanceM: friend.distanceM,
                                  course: motion[friend.id]?.course,
                                  speedMps: motion[friend.id]?.speed ?? 0)
         }
-        guard !people.isEmpty else { return }
+        guard !people.isEmpty else { return nil }
+        return OrbitSnapshot(heading: Double(compass.wholeHeading), people: Array(people))
+    }
 
-        let snapshot = OrbitSnapshot(heading: Double(compass.wholeHeading), people: Array(people))
+    /// Real time, as far as iOS allows it: the activity is pushed on every whole degree and
+    /// every fix. The home screen widgets cannot be driven this way — WidgetKit reloads them
+    /// on a daily budget — so they get the projected timeline instead.
+    private func pushLive() {
+        guard phase == .orbit, let snapshot = currentSnapshot() else { return }
+        if live.isRunning {
+            live.update(with: snapshot)
+        } else {
+            live.start(with: snapshot)
+            compass.requestBackgroundUpdates()
+        }
+    }
+
+    private func publishSnapshot(force: Bool = false) {
+        guard let snapshot = currentSnapshot() else { return }
         let elapsed = Date().timeIntervalSince(lastSnapshotWrite)
         // WidgetKit budgets reloads, so only a change a viewer could actually see is worth one.
         guard force || snapshot.differsMeaningfully(from: lastSnapshot) || elapsed > 300 else { return }

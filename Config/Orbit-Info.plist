@@ -4,6 +4,14 @@
 <dict>
 	<!-- Everything the build system can generate is generated: this file only carries the
 	     keys it cannot (GENERATE_INFOPLIST_FILE merges the rest in). -->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>UIAppFonts</key>
 	<array>
 		<string>Archivo-Regular.ttf</string>

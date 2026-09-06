@@ -33,6 +33,10 @@ final class DeviceCompass: NSObject {
     /// Time constant of the easing: higher follows the sensor harder, lower glides more.
     private let responsiveness = 11.0
 
+    /// Fired when the whole degree changes — a few times a second, not per frame. The Live
+    /// Activity rides on this, so the Lock Screen turns when the dial does.
+    var onHeadingChange: ((Int) -> Void)?
+
     private let manager = CLLocationManager()
     private var link: CADisplayLink?
     private var lastFrame: CFTimeInterval = 0
@@ -72,9 +76,27 @@ final class DeviceCompass: NSObject {
         manager.requestWhenInUseAuthorization()
     }
 
+    /// Asked for only when a Live Activity starts, and only as an escalation from
+    /// when-in-use: without it the dial on the Lock Screen stops the moment the phone goes
+    /// in a pocket, which is exactly when it is worth having.
+    func requestBackgroundUpdates() {
+        guard authorization == .authorizedWhenInUse else {
+            enableBackgroundUpdatesIfAllowed()
+            return
+        }
+        manager.requestAlwaysAuthorization()
+    }
+
+    private func enableBackgroundUpdatesIfAllowed() {
+        guard authorization == .authorizedAlways else { return }
+        manager.allowsBackgroundLocationUpdates = true
+        manager.pausesLocationUpdatesAutomatically = false
+    }
+
     private func beginUpdates() {
         guard authorization == .authorizedWhenInUse || authorization == .authorizedAlways else { return }
         manager.startUpdatingLocation()
+        enableBackgroundUpdatesIfAllowed()
         if CLLocationManager.headingAvailable() {
             manager.startUpdatingHeading()
         }
@@ -94,7 +116,10 @@ final class DeviceCompass: NSObject {
         heading += (target - heading) * (1 - exp(-responsiveness * dt))
 
         let whole = Int(Geo.normalize(heading).rounded()) % 360
-        if whole != wholeHeading { wholeHeading = whole }
+        if whole != wholeHeading {
+            wholeHeading = whole
+            onHeadingChange?(whole)
+        }
     }
 
     /// Move the target by the *shortest* turn, so 359° → 001° crosses north instead of
