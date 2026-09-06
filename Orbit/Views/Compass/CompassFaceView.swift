@@ -38,7 +38,7 @@ struct CompassFaceView: View {
                     // Redrawn every frame from the eased heading; the readout beside it is
                     // bound to whole degrees, so only the geometry pays the frame rate.
                     DialView(heading: model.compass.heading,
-                             markers: compassModel.tracked.map(DialMarker.init))
+                             markers: compassModel.tracked.map { DialMarker($0) })
                         .frame(width: ringSize, height: ringSize)
 
                     CompassReadout(ringSize: ringSize,

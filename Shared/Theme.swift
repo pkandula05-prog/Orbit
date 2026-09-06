@@ -85,10 +85,13 @@ struct InitialBadge: View {
     var size: CGFloat
     var filled = true
     var fill: Color = OrbitColor.red
+    /// The artboards do not scale the letter linearly with the square — a 54pt tile carries
+    /// 20pt, a 20pt one carries 11 — so the size can be set where it differs.
+    var fontSize: CGFloat?
 
     var body: some View {
         Text(initial)
-            .font(OrbitFont.heading(size * 0.37))
+            .font(OrbitFont.heading(fontSize ?? size * 0.37))
             .foregroundStyle(filled ? OrbitColor.bg : OrbitColor.neutral700)
             .frame(width: size, height: size)
             .background(filled ? fill : .clear)

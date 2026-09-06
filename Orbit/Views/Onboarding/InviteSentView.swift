@@ -41,7 +41,8 @@ struct InviteSentView: View {
                     ListRow(isFirst: offset == 0, minHeight: 60) {
                         HStack(spacing: 14) {
                             InitialBadge(initial: contact.initial, size: 20,
-                                         fill: contact.status == .sharing ? OrbitColor.onTarget : OrbitColor.red)
+                                         fill: contact.status == .sharing ? OrbitColor.onTarget : OrbitColor.red,
+                                         fontSize: 11)
                             Text(contact.name)
                                 .font(OrbitFont.semibold(16))
                                 .foregroundStyle(OrbitColor.ink)

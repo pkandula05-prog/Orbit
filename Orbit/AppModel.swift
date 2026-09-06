@@ -120,7 +120,7 @@ final class AppModel {
 
     private func listenForAcceptances() {
         acceptTask?.cancel()
-        acceptTask = Task { [weak self] in
+        acceptTask = Task { [weak self, backend] in
             for await accepted in backend.acceptances() {
                 guard let self, !Task.isCancelled else { return }
                 self.mark(accepted.id, as: .sharing)

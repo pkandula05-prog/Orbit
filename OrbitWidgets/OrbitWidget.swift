@@ -111,7 +111,7 @@ private struct MediumWidget: View {
         let delta = snapshot.delta(to: person)
 
         return HStack(alignment: .firstTextBaseline, spacing: 10) {
-            InitialBadge(initial: person.initial, size: 16)
+            InitialBadge(initial: person.initial, size: 16, fontSize: 9)
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.name)
                     .font(OrbitFont.semibold(13))
