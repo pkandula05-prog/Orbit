@@ -35,24 +35,6 @@ public struct DialStyle: Sendable {
         majorTicks: (8, 3, 16, 144, OrbitColor.neutral600)
     )
 
-    public static let widgetSmall = DialStyle(
-        trackRadius: 130, trackWidth: 11, trackColor: OrbitColor.neutral300, arcColor: OrbitColor.blue,
-        markerRadius: 15, markerCenterY: 20, markerStroke: 4, markerFill: OrbitColor.bg,
-        markerLabelSize: 14, showsMarkerLabels: true,
-        bodyRadius: 15, bodyCenterY: 22.5, bodyColor: OrbitColor.red,
-        minorTicks: (36, 2, 7, 148, OrbitColor.neutral400),
-        majorTicks: (4, 3, 14, 145, OrbitColor.neutral600)
-    )
-
-    public static let widgetMedium = DialStyle(
-        trackRadius: 130, trackWidth: 11, trackColor: OrbitColor.neutral300, arcColor: OrbitColor.blue,
-        markerRadius: 15, markerCenterY: 20, markerStroke: 4, markerFill: OrbitColor.bg,
-        markerLabelSize: 14, showsMarkerLabels: true,
-        bodyRadius: 15, bodyCenterY: 22.5, bodyColor: OrbitColor.red,
-        minorTicks: (36, 2, 7, 148, OrbitColor.neutral400),
-        majorTicks: nil
-    )
-
     /// Lock screen: one tinted layer, so the track is white at two opacities.
     public static let lockScreen = DialStyle(
         trackRadius: 126, trackWidth: 18, trackColor: OrbitColor.bg.opacity(0.3), arcColor: OrbitColor.bg,

@@ -57,13 +57,7 @@ final class AppModel {
     private var feedTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var usernameTask: Task<Void, Never>?
-    /// Previous fix per friend, so their course and speed can be handed to the widgets.
-    private var previousFixes: [String: FriendLocation] = [:]
-    private var motion: [String: (course: Double, speed: Double)] = [:]
-    private var lastSnapshot: OrbitSnapshot?
-    private var lastSnapshotWrite = Date.distantPast
-
-    private let defaults = OrbitShared.defaults ?? .standard
+    private let defaults = UserDefaults.standard
     private enum Key {
         static let onboarded = "orbit.onboarded"
         static let profile = "orbit.profile"
@@ -156,7 +150,8 @@ final class AppModel {
         feedTask = Task { [weak self] in
             for await batch in source.stream() {
                 guard let self, !Task.isCancelled else { return }
-                self.ingest(batch)
+                self.friends = batch
+                self.pushLive()
             }
         }
     }
@@ -170,25 +165,6 @@ final class AppModel {
             return RESTFriendSource(endpoint: url, token: token?.isEmpty == false ? token : nil)
         }
         return MockFriendSource(origin: origin, visible: visible)
-    }
-
-    /// Each batch is also two fixes for the same person, which is where their course and speed
-    /// come from — the widgets need to show which way someone is moving, not just where.
-    private func ingest(_ batch: [FriendLocation]) {
-        for friend in batch {
-            if let previous = previousFixes[friend.id] {
-                let seconds = friend.updatedAt.timeIntervalSince(previous.updatedAt)
-                let metres = Geo.distance(from: previous.coordinate, to: friend.coordinate)
-                if seconds > 0.5, metres > 1 {
-                    motion[friend.id] = (Geo.bearing(from: previous.coordinate, to: friend.coordinate),
-                                         metres / seconds)
-                }
-            }
-            previousFixes[friend.id] = friend
-        }
-        friends = batch
-        publishSnapshot()
-        pushLive()
     }
 
     private func listenForEvents() {
@@ -344,7 +320,6 @@ final class AppModel {
             trackedIDs.append(id)
         }
         persist()
-        publishSnapshot(force: true)
         if trackedIDs.isEmpty { live.stop() } else { pushLive() }
     }
 
@@ -398,21 +373,19 @@ final class AppModel {
     /// The widgets redraw from this. Written whenever the dial has materially changed — a new
     /// bearing, a new distance, someone added or dropped — rather than on a fixed clock, so a
     /// widget is never more than one fix behind while the app is open.
-    /// The dial as the widgets and the Live Activity want it.
+    /// The dial as the Live Activity wants it.
     private func currentSnapshot() -> OrbitSnapshot? {
         let people = model.tracked.prefix(2).map { friend in
             OrbitSnapshot.Person(id: friend.id, name: friend.name, initial: friend.initial,
-                                 bearing: friend.bearing, distanceM: friend.distanceM,
-                                 course: motion[friend.id]?.course,
-                                 speedMps: motion[friend.id]?.speed ?? 0)
+                                 bearing: friend.bearing, distanceM: friend.distanceM)
         }
         guard !people.isEmpty else { return nil }
         return OrbitSnapshot(heading: Double(compass.wholeHeading), people: Array(people))
     }
 
-    /// Real time, as far as iOS allows it: the activity is pushed on every whole degree and
-    /// every fix. The home screen widgets cannot be driven this way — WidgetKit reloads them
-    /// on a daily budget — so they get the projected timeline instead.
+    /// Real time, as far as iOS allows: the activity is pushed on every whole degree and every
+    /// fix. This is the only surface outside the app that can keep up — a home screen widget
+    /// cannot read the compass and is reloaded on a daily budget, which is why there are none.
     private func pushLive() {
         guard phase == .orbit, let snapshot = currentSnapshot() else { return }
         if live.isRunning {
@@ -421,17 +394,5 @@ final class AppModel {
             live.start(with: snapshot)
             compass.requestBackgroundUpdates()
         }
-    }
-
-    private func publishSnapshot(force: Bool = false) {
-        guard let snapshot = currentSnapshot() else { return }
-        let elapsed = Date().timeIntervalSince(lastSnapshotWrite)
-        // WidgetKit budgets reloads, so only a change a viewer could actually see is worth one.
-        guard force || snapshot.differsMeaningfully(from: lastSnapshot) || elapsed > 300 else { return }
-        guard force || elapsed > 15 else { return }
-
-        lastSnapshot = snapshot
-        lastSnapshotWrite = Date()
-        OrbitShared.write(snapshot)
     }
 }

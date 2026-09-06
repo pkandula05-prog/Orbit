@@ -11,54 +11,39 @@ struct OrbitLiveActivity: Widget {
                 .activityBackgroundTint(OrbitColor.ink.opacity(0.85))
                 .activitySystemActionForegroundColor(OrbitColor.bg)
         } dynamicIsland: { context in
+            // ActivityKit requires a Dynamic Island presentation; there is no way to decline
+            // one. So it is kept to the minimum the API accepts — the heading, nothing more —
+            // rather than a second copy of the dial competing with the Lock Screen.
             let snapshot = context.state.snapshot
-            let first = snapshot.people.first
 
             return DynamicIsland {
-                DynamicIslandExpandedRegion(.leading) {
-                    StaticDialView(heading: snapshot.heading, markers: snapshot.markers,
-                                   style: .lockScreen, size: 62)
-                }
-                DynamicIslandExpandedRegion(.trailing) {
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Text(Geo.formatHeading(snapshot.heading))
-                            .font(OrbitFont.mono(24))
-                            .foregroundStyle(.white)
-                        if let first {
-                            Text("\(first.name) \(Geo.formatDistance(first.distanceM))")
-                                .caps(9, .white.opacity(0.7))
-                        }
-                    }
-                }
-                DynamicIslandExpandedRegion(.bottom) {
-                    HStack(spacing: 18) {
-                        ForEach(snapshot.people) { person in
-                            HStack(spacing: 6) {
-                                Text(person.name).caps(9, .white.opacity(0.7))
-                                Text(Geo.formatDelta(snapshot.delta(to: person)))
-                                    .font(OrbitFont.mono(15))
-                                    .foregroundStyle(.white)
-                            }
-                        }
-                        Spacer(minLength: 0)
-                    }
+                DynamicIslandExpandedRegion(.center) {
+                    Text(Geo.formatHeading(snapshot.heading))
+                        .font(OrbitFont.mono(22))
+                        .foregroundStyle(.white)
                 }
             } compactLeading: {
                 Text(Geo.formatHeading(snapshot.heading))
                     .font(OrbitFont.mono(12))
                     .foregroundStyle(OrbitColor.red)
             } compactTrailing: {
-                if let first {
-                    Text(Geo.formatDelta(snapshot.delta(to: first)))
-                        .font(OrbitFont.mono(12))
-                        .foregroundStyle(.white)
-                }
+                EmptyView()
             } minimal: {
                 Text(Geo.formatHeading(snapshot.heading))
                     .font(OrbitFont.mono(11))
                     .foregroundStyle(OrbitColor.red)
             }
         }
+    }
+}
+
+/// The extension exists only to host the Live Activity now. The home screen widgets were
+/// removed: a widget extension cannot read the compass and is reloaded on a daily budget, so
+/// a live dial was never possible there — this is the surface the app can actually push to.
+@main
+struct OrbitWidgetBundle: WidgetBundle {
+    var body: some Widget {
+        OrbitLiveActivity()
     }
 }
 

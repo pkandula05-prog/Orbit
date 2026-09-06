@@ -20,10 +20,8 @@ Pick the **Orbit** scheme and Run. Two things to set once, in *Signing & Capabil
 
 1. Choose your team. The bundle identifiers are `com.orbit.compass` and
    `com.orbit.compass.widgets`; change the prefix if that pair is taken.
-2. Both targets declare the App Group `group.com.orbit.compass`, which is how the widgets see
-   the dial. A free personal team cannot create App Groups — if signing fails, delete the
-   capability from both targets, or remove the **OrbitWidgets** target entirely. The app falls
-   back to standard user defaults on its own and keeps working; only the widgets go quiet.
+2. Nothing else. There are no entitlements and no App Group to provision — the Live Activity
+   carries its own state — so a personal team is enough to build and run.
 
 **The compass needs real hardware.** On a device Orbit asks for location-when-in-use and reads
 true heading from the magnetometer. In the Simulator there is no magnetometer, so the dial
@@ -49,7 +47,7 @@ map:
 | 07 | Invites out | `Views/Onboarding/InviteSentView.swift` |
 | 08 | Sharing request | `Views/Friends/InvitesView.swift` (the bell's inbox) |
 | 09 / 5a / 5b | Orbit (the dial) | `Views/Compass/CompassFaceView.swift` |
-| 6a / 6b / 6c | Widgets | `OrbitWidgets/OrbitWidget.swift` |
+| — | Live Activity | `OrbitWidgets/OrbitLiveActivity.swift` |
 
 `5a` and `5b` are the same screen at different roster sizes, so the app switches on the tracked
 count rather than routing between two screens: at three or more friends the numeral shrinks
@@ -131,51 +129,33 @@ Contacts are read only when someone taps **Match contacts** on the friends page
 (`ContactsAccess.requestAndFetch`), and location and compass access are asked for only on the
 permissions screen (05). Launching the app raises no system prompt.
 
-## Widgets
+## The Live Activity
 
-`OrbitWidgets` ships all three widget artboards from one `Widget`: small (6a), medium (6b) and
-lock-screen circular (6c). A widget cannot read the compass — an extension is woken for a
-timeline, not run continuously — so the app writes the dial into the App Group and the widgets
-render that.
+There are no home screen widgets. A widget extension cannot read the compass — there is no API
+— and WidgetKit reloads it on a budget of a few dozen times a day, so a dial that follows you
+was never possible there. Rather than ship one that lies, the app ships the surface that does
+work.
 
-They are not stuck on one still frame: each fix is compared against the previous one to get
-that friend's **course and speed**, which travel with the snapshot, and the timeline carries a
-minute-by-minute projection of where that motion takes them. The app pushes a fresh timeline
-whenever the real dial moves enough to be worth one — two degrees of bearing, or 25 metres.
+A **Live Activity** (`Shared/OrbitActivity.swift`, `OrbitWidgets/OrbitLiveActivity.swift`) is
+pushed *by the app*, so `LiveDial` updates it on every whole degree of heading and every new
+fix: the Lock Screen dial turns with the one on screen. It starts when you open the orbit with
+someone tracked and ends when you stop tracking everyone.
 
-**A home screen widget cannot follow a compass, and no amount of code changes that.** WidgetKit
-wakes an extension to hand back a timeline, on a budget of a few dozen reloads a day, and never
-runs it continuously; there is no API for an extension to read heading. So the widget's delta is
-never "you are facing them right now" — which is why the medium widget draws it in red rather
-than flipping to on-target green. Green there would be a claim the widget cannot make.
-
-## The Live Activity — the real-time surface
-
-For a dial that actually keeps up while you walk, Orbit runs a **Live Activity**
-(`Shared/OrbitActivity.swift`, `OrbitWidgets/OrbitLiveActivity.swift`). Unlike a widget, its
-state is pushed *by the app*, so `LiveDial` updates it on every whole degree of heading and
-every new fix — the Lock Screen and Dynamic Island turn with the dial, not on a timer.
-
-It starts when you open the orbit with someone tracked, and ends when you stop tracking
-everyone. Two notes on it:
-
-- Starting one asks to escalate location access from when-in-use to **always**. Without that
-  the activity freezes the moment the phone goes in a pocket, which is exactly when a Lock
-  Screen dial earns its place. Declining is fine — it simply stops updating in the background.
-- `NSSupportsLiveActivitiesFrequentUpdates` is set, which asks the system to allow a high update
-  rate. iOS still budgets this, and heavy use will be throttled.
-
-WidgetKit archives a widget's view tree and replays it out of process, where `Canvas` cannot be
-relied on to draw, so `Shared/StaticDialView.swift` builds the same dial from shapes. Both read
-the same `DialStyle`, so the two cannot drift apart on geometry.
+- Starting one escalates location access from when-in-use to **always**. Without that it
+  freezes as soon as the phone goes in a pocket, which is when a Lock Screen dial earns its
+  place. Declining is fine — it then only updates with the app open.
+- ActivityKit requires a Dynamic Island presentation and offers no way to decline one, so it is
+  kept to the minimum the API accepts: the heading, nothing else.
+- The app needs no App Group and no entitlements file: activity state travels through
+  ActivityKit, not a shared container. Signing is a team selection and nothing more.
 
 ## Layout
 
 ```
-Shared/          Geo, the compass model, theme tokens, both dial renderers, the App Group
-                 snapshot, and Archivo — compiled into the app and the widget extension
+Shared/          Geo, the compass model, theme tokens, both dial renderers, the dial snapshot
+                 and Archivo — compiled into the app and the Live Activity extension
 Orbit/           The app: AppModel (the flow), Services (compass, feeds, accounts), Views
-OrbitWidgets/    The widget extension
+OrbitWidgets/    The Live Activity extension
 Config/          Info.plists and entitlements for both targets
 Tools/           make_icon.py — renders the app icon from the artboard's geometry
 ```
